@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+commit_msg_file=${1:-}
+
+if [ -z "$commit_msg_file" ] || [ ! -f "$commit_msg_file" ]; then
+  exit 0
+fi
+
+subject=$(sed -n '/^[[:space:]]*#/d; /^[[:space:]]*$/d; {p; q;}' "$commit_msg_file")
+
+if [ -z "$subject" ]; then
+  printf 'Commit message subject must not be empty.\n' >&2
+  exit 1
+fi
+
+case "$subject" in
+  Merge\ *|Revert\ *|fixup!\ *|squash!\ *)
+    exit 0
+    ;;
+esac
+
+if [ "${#subject}" -gt 72 ]; then
+  printf 'Commit message subject must be 72 characters or fewer.\n' >&2
+  printf 'Subject: %s\n' "$subject" >&2
+  exit 1
+fi
+
+pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^ ].*$'
+
+if ! printf '%s\n' "$subject" | grep -Eq "$pattern"; then
+  printf 'Commit message must follow Conventional Commits:\n' >&2
+  printf '  <type>[optional scope]: <description>\n\n' >&2
+  printf 'Allowed types: build, chore, ci, docs, feat, fix, perf, refactor, revert, style, test\n' >&2
+  printf 'Examples:\n' >&2
+  printf '  feat: add bilingual EPUB conversion\n' >&2
+  printf '  fix(cli): reject invalid batch size\n' >&2
+  exit 1
+fi

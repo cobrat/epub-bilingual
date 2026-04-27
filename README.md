@@ -72,6 +72,21 @@ tests/                 # 单元测试
 uv run python -m unittest discover -s tests
 ```
 
+## Git hooks
+
+仓库使用 `.githooks/` 作为 Git hooks 目录。提交前会运行测试并检查 staged 文件，提交信息需要使用 Conventional Commits 格式：
+
+```text
+<type>[optional scope]: <description>
+```
+
+示例：
+
+```text
+feat: add bilingual EPUB conversion
+fix(cli): reject invalid batch size
+```
+
 仓库根目录有 `books/` 文件夹，可以把自己的 EPUB 放在这里。仓库里也包含一个最小 EPUB 样例：`books/tiny.epub`。可以用 mock 模式生成双语测试书，不会调用大模型：
 
 ```bash
