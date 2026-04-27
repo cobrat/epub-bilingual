@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+blocked=$(printf '%s\n' "$staged_files" | awk '
+  $0 == ".env" { print; next }
+  $0 ~ /^\.env\./ && $0 != ".env.example" { print; next }
+  $0 ~ /\.translation-cache\.json$/ { print; next }
+  $0 ~ /^books\// && $0 != "books/tiny.epub" { print; next }
+')
+
+if [ -n "$blocked" ]; then
+  printf 'Refusing to commit local/private generated files:\n%s\n' "$blocked" >&2
+  exit 1
+fi
+
+large_files=$(
+  printf '%s\n' "$staged_files" | while IFS= read -r path; do
+    if [ -f "$path" ]; then
+      size=$(wc -c < "$path" | tr -d ' ')
+      if [ "$size" -gt 20971520 ]; then
+        printf '%s\n' "$path"
+      fi
+    fi
+  done
+)
+
+if [ -n "$large_files" ]; then
+  printf 'Refusing to commit files larger than 20 MiB:\n%s\n' "$large_files" >&2
+  exit 1
+fi
+
+uv run python -m unittest discover -s tests

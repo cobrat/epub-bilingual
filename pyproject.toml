@@ -1,0 +1,17 @@
+[project]
+name = "ebook-bilingual-converter"
+version = "0.1.0"
+description = "Convert EPUB books into bilingual side-by-side EPUBs with an OpenAI-compatible LLM."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ebook-bilingual = "ebook_bilingual.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ebook_bilingual"

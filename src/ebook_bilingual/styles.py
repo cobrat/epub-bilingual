@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+
+BILINGUAL_CSS = """
+.bilingual-original {
+  margin-bottom: 0.25em;
+}
+.bilingual-translation {
+  color: #4b5563;
+  font-size: 0.95em;
+  line-height: 1.55;
+  margin-top: -0.15em;
+  margin-bottom: 1em;
+}
+""".strip()
+
+
+CLEAN_BILINGUAL_CSS = """
+@page {
+  margin: 1.1em 1em;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: #fff;
+  color: #111;
+  font-family: serif;
+  line-height: 1.5;
+  margin: 0;
+  padding: 0;
+}
+
+main {
+  display: block;
+}
+
+.bilingual-pair {
+  break-inside: avoid;
+  margin: 0 0 1.15em 0;
+  page-break-inside: avoid;
+}
+
+.bilingual-original {
+  font-size: 1em;
+  font-weight: 400;
+  line-height: 1.45;
+  margin: 0 0 0.28em 0;
+}
+
+.bilingual-translation {
+  color: #333;
+  font-family: sans-serif;
+  font-size: 0.92em;
+  line-height: 1.55;
+  margin: 0;
+}
+
+img,
+svg {
+  height: auto;
+  max-width: 100%;
+}
+
+pre {
+  border: 1px solid #bbb;
+  font-family: monospace;
+  font-size: 0.86em;
+  line-height: 1.35;
+  margin: 0.8em 0;
+  overflow-wrap: anywhere;
+  padding: 0.45em;
+  white-space: pre-wrap;
+}
+
+code {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+table {
+  border-collapse: collapse;
+  font-size: 0.86em;
+  margin: 0.9em 0;
+  width: 100%;
+}
+
+td,
+th {
+  border: 1px solid #aaa;
+  padding: 0.28em;
+  vertical-align: top;
+}
+
+blockquote {
+  border-left: 2px solid #777;
+  margin: 0.8em 0 0.8em 0.8em;
+  padding-left: 0.7em;
+}
+
+h1.bilingual-original {
+  font-size: 1.35em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 1.1em 0 0.4em 0;
+}
+
+h2.bilingual-original {
+  font-size: 1.18em;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 1em 0 0.35em 0;
+}
+
+h3.bilingual-original,
+h4.bilingual-original,
+h5.bilingual-original,
+h6.bilingual-original {
+  font-size: 1.06em;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 0.9em 0 0.3em 0;
+}
+""".strip()

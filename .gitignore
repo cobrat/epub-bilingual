@@ -1,0 +1,39 @@
+# Python generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Tool/runtime caches
+.cache/
+.uv-cache/
+
+# OS/editor files
+*.translation-cache.json
+.DS_Store
+Thumbs.db
+
+# Generated EPUB outputs and isolated run directories
+*.bilingual.epub
+*.run/
+
+# Local books can be large or copyrighted. Keep only the tiny sample in git.
+books/*
+!books/tiny.epub
