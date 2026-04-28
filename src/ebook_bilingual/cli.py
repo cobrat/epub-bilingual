@@ -24,13 +24,19 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ebook-bilingual",
         description="Convert an EPUB into a bilingual EPUB by inserting LLM translations under original paragraphs.",
     )
-    parser.add_argument("input", type=Path, help="Input .epub file")
+    parser.add_argument("input", type=Path, nargs="?", default=None, help="Input .epub file")
     parser.add_argument(
         "output",
         type=Path,
         nargs="?",
         default=None,
         help="Output bilingual .epub file. Defaults to <input>.bilingual.epub in the same directory.",
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="Run a plain terminal wizard that asks for conversion options.",
     )
 
     model_group = parser.add_argument_group("model configuration")
@@ -151,6 +157,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.interactive:
+        from .interactive import run_interactive
+
+        return run_interactive(
+            args,
+            execute=lambda cli_args: run_from_args(parser.parse_args(cli_args), parser),
+        )
+    if args.input is None:
+        parser.error("input is required unless --interactive is used")
+    return run_from_args(args, parser)
+
+
+def run_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.input is None:
+        parser.error("input is required unless --interactive is used")
     if not args.input.exists():
         parser.error(f"Input file does not exist: {args.input}")
     if args.output is not None and args.output.resolve() == args.input.resolve():

@@ -38,6 +38,20 @@ uv run ebook-bilingual books/book.epub \
   --target-lang "Simplified Chinese"
 ```
 
+如果不想一次写完整参数，可以使用普通终端菜单式向导：
+
+```bash
+uv run ebook-bilingual --interactive
+```
+
+也可以先给出输入文件，让向导预填：
+
+```bash
+uv run ebook-bilingual --interactive books/book.epub
+```
+
+向导默认使用中文界面，顶部会用状态框显示输入 EPUB、输出 EPUB、翻译模型配置和转换选项；下方菜单按使用流程分成常用操作、可选调整和其他。常用操作包括开始转换 EPUB、选择 EPUB 文件、配置翻译模型；可选调整包括设置输出位置、设置译文显示方式、高级参数；其他里可以保存 `.env` 或进入界面语言菜单选择中文/English。选择 EPUB 文件菜单会自动列出 `books/` 下的 EPUB，可以输入编号选择。开始转换会先执行 dry-run，显示段落数、缓存和费用估算，然后再询问是否继续真实转换。API Key 只显示是否已配置，不会回显；只有在单独确认后才会写入 `.env`。按 `Ctrl-C` 或 `Ctrl-D` 会直接退出，不显示错误堆栈。
+
 ## 常用参数
 
 - 未指定输出文件时：自动输出到输入文件同目录，命名为 `<原名>.bilingual.epub`。
