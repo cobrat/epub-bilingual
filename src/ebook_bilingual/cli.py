@@ -32,40 +32,69 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output bilingual .epub file. Defaults to <input>.bilingual.epub in the same directory.",
     )
-    parser.add_argument("--model", default=os.getenv("LLM_MODEL"), help="LLM model name. Defaults to LLM_MODEL.")
-    parser.add_argument(
+
+    model_group = parser.add_argument_group("model configuration")
+    model_group.add_argument("--model", default=os.getenv("LLM_MODEL"), help="LLM model name. Defaults to LLM_MODEL.")
+    model_group.add_argument(
         "--api-key",
         default=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY"),
         help="API key. Defaults to LLM_API_KEY or OPENAI_API_KEY.",
     )
-    parser.add_argument(
+    model_group.add_argument(
         "--base-url",
         default=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
         help="OpenAI-compatible API base URL.",
     )
-    parser.add_argument("--source-lang", default=os.getenv("LLM_SOURCE_LANG", "auto"), help="Source language hint.")
-    parser.add_argument(
+    model_group.add_argument("--source-lang", default=os.getenv("LLM_SOURCE_LANG", "auto"), help="Source language hint.")
+    model_group.add_argument(
         "--target-lang",
         default=os.getenv("LLM_TARGET_LANG", "Simplified Chinese"),
         help="Target translation language.",
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Paragraphs per LLM request.")
-    parser.add_argument(
+
+    conversion_group = parser.add_argument_group("conversion options")
+    conversion_group.add_argument(
+        "--layout",
+        choices=("preserve", "clean"),
+        default=os.getenv("LLM_LAYOUT", "preserve"),
+        help="EPUB layout mode. preserve keeps original XHTML/CSS; clean restyles readable bilingual XHTML.",
+    )
+    conversion_group.add_argument(
+        "--style-css",
+        type=Path,
+        default=Path(os.getenv("LLM_STYLE_CSS")) if os.getenv("LLM_STYLE_CSS") else None,
+        help="Custom CSS file for --layout clean. Defaults to a 10.3-inch e-ink friendly style.",
+    )
+    conversion_group.add_argument(
+        "--number-headings",
+        action="store_true",
+        help="Prefix h1-h3 headings with generated hierarchical numbers in --layout clean output.",
+    )
+    conversion_group.add_argument("--dry-run", action="store_true", help="Analyze the EPUB and estimate cost without calling an LLM.")
+    conversion_group.add_argument(
+        "--mock",
+        action="store_true",
+        help="Do not call an LLM; insert placeholder translations. Useful for EPUB structure testing.",
+    )
+
+    advanced_group = parser.add_argument_group("advanced options")
+    advanced_group.add_argument("--batch-size", type=int, default=8, help="Paragraphs per LLM request.")
+    advanced_group.add_argument(
         "--concurrency",
         type=int,
         default=int(os.getenv("LLM_CONCURRENCY", "1")),
         help="Concurrent translation requests. Defaults to LLM_CONCURRENCY or 1.",
     )
-    parser.add_argument("--min-chars", type=int, default=2, help="Skip text shorter than this many characters.")
-    parser.add_argument("--timeout", type=int, default=120, help="HTTP timeout in seconds.")
-    parser.add_argument("--retries", type=int, default=3, help="LLM request retries.")
-    parser.add_argument(
+    advanced_group.add_argument("--min-chars", type=int, default=2, help="Skip text shorter than this many characters.")
+    advanced_group.add_argument("--timeout", type=int, default=120, help="HTTP timeout in seconds.")
+    advanced_group.add_argument("--retries", type=int, default=3, help="LLM request retries.")
+    advanced_group.add_argument(
         "--cache",
         type=Path,
         default=None,
         help="Translation cache path. Defaults to <output>.translation-cache.json.",
     )
-    parser.add_argument(
+    advanced_group.add_argument(
         "--work-dir",
         type=Path,
         default=None,
@@ -74,59 +103,38 @@ def build_parser() -> argparse.ArgumentParser:
             "default output/cache files are written there."
         ),
     )
-    parser.add_argument(
-        "--layout",
-        choices=("preserve", "clean"),
-        default=os.getenv("LLM_LAYOUT", "preserve"),
-        help="EPUB layout mode. preserve keeps original XHTML/CSS; clean restyles readable bilingual XHTML.",
-    )
-    parser.add_argument(
-        "--style-css",
-        type=Path,
-        default=Path(os.getenv("LLM_STYLE_CSS")) if os.getenv("LLM_STYLE_CSS") else None,
-        help="Custom CSS file for --layout clean. Defaults to a 10.3-inch e-ink friendly style.",
-    )
-    parser.add_argument(
-        "--number-headings",
-        action="store_true",
-        help="Prefix h1-h3 headings with generated hierarchical numbers in --layout clean output.",
-    )
-    parser.add_argument("--limit", type=int, default=None, help="Translate only the first N segments.")
-    parser.add_argument("--dry-run", action="store_true", help="Analyze the EPUB and estimate cost without calling an LLM.")
-    parser.add_argument(
-        "--input-price-per-1m",
-        type=float,
-        default=optional_float_env("LLM_INPUT_PRICE_PER_1M"),
-        help="Input token price per 1M tokens for dry-run cost estimates.",
-    )
-    parser.add_argument(
-        "--output-price-per-1m",
-        type=float,
-        default=optional_float_env("LLM_OUTPUT_PRICE_PER_1M"),
-        help="Output token price per 1M tokens for dry-run cost estimates.",
-    )
-    parser.add_argument(
-        "--price-currency",
-        default=os.getenv("LLM_PRICE_CURRENCY", "USD"),
-        help="Currency label for dry-run cost estimates.",
-    )
-    parser.add_argument(
-        "--output-token-ratio",
-        type=float,
-        default=float(os.getenv("LLM_OUTPUT_TOKEN_RATIO", "1.15")),
-        help="Estimated output/input token ratio for dry-run. Defaults to 1.15.",
-    )
-    parser.add_argument(
+    advanced_group.add_argument("--limit", type=int, default=None, help="Translate only the first N segments.")
+    advanced_group.add_argument(
         "--terminology",
         type=Path,
         default=Path(os.getenv("LLM_TERMINOLOGY")) if os.getenv("LLM_TERMINOLOGY") else None,
         help="CSV/TSV glossary with source,target[,note] columns.",
     )
-    parser.add_argument("--quiet", action="store_true", help="Hide translation progress output.")
-    parser.add_argument(
-        "--mock",
-        action="store_true",
-        help="Do not call an LLM; insert placeholder translations. Useful for EPUB structure testing.",
+    advanced_group.add_argument("--quiet", action="store_true", help="Hide translation progress output.")
+
+    pricing_group = parser.add_argument_group("dry-run cost estimates")
+    pricing_group.add_argument(
+        "--input-price-per-1m",
+        type=float,
+        default=optional_float_env("LLM_INPUT_PRICE_PER_1M"),
+        help="Input token price per 1M tokens for dry-run cost estimates.",
+    )
+    pricing_group.add_argument(
+        "--output-price-per-1m",
+        type=float,
+        default=optional_float_env("LLM_OUTPUT_PRICE_PER_1M"),
+        help="Output token price per 1M tokens for dry-run cost estimates.",
+    )
+    pricing_group.add_argument(
+        "--price-currency",
+        default=os.getenv("LLM_PRICE_CURRENCY", "USD"),
+        help="Currency label for dry-run cost estimates.",
+    )
+    pricing_group.add_argument(
+        "--output-token-ratio",
+        type=float,
+        default=float(os.getenv("LLM_OUTPUT_TOKEN_RATIO", "1.15")),
+        help="Estimated output/input token ratio for dry-run. Defaults to 1.15.",
     )
     return parser
 
