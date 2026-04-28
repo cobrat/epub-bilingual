@@ -97,12 +97,19 @@ class InteractiveTests(unittest.TestCase):
     def test_status_box_shows_settings_without_api_key_value(self) -> None:
         text = "\n".join(render_status_box(sample_config()))
 
+        self.assertIn("状态: 可以开始 - 开始转换会先 dry-run", text)
         self.assertIn("输入 EPUB: books/book.epub", text)
         self.assertIn("翻译模型: test-model", text)
         self.assertIn("API Key: 已配置", text)
         self.assertIn("布局: clean", text)
         self.assertIn("批大小: 4", text)
         self.assertNotIn("secret", text)
+
+    def test_status_box_shows_missing_start_requirements(self) -> None:
+        text = "\n".join(render_status_box(sample_config(api_key="")))
+
+        self.assertIn("状态: 还需配置", text)
+        self.assertIn("API Key: 缺失", text)
 
     def test_language_menu_explicitly_switches_to_english(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,13 +137,13 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("常用操作:", output_text)
-        self.assertIn("1. 开始转换 EPUB", output_text)
+        self.assertIn("1. 开始转换 EPUB（先 dry-run）", output_text)
         self.assertIn("2. 选择 EPUB 文件", output_text)
         self.assertIn("8. 界面语言 / Language: 中文", output_text)
         self.assertIn("界面语言 / Interface Language", output_text)
         self.assertIn("Interface language set to English.", output_text)
         self.assertIn("Common tasks:", output_text)
-        self.assertIn("1. Start EPUB conversion", output_text)
+        self.assertIn("1. Start EPUB conversion (dry-run first)", output_text)
         self.assertIn("2. Select EPUB file", output_text)
         self.assertIn("8. Language / 界面语言: English", output_text)
 
@@ -273,8 +280,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls[0][0], "books/b.epub")
         self.assertIn("books/ 下可选 EPUB:", outputs)
-        self.assertIn("  1. books/a.epub", outputs)
-        self.assertIn("  2. books/b.epub", outputs)
+        self.assertIn("1. books/a.epub", outputs)
+        self.assertIn("2. books/b.epub", outputs)
 
     def test_ebook_menu_reprompts_for_invalid_manual_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -5,8 +5,16 @@ from dataclasses import dataclass
 import getpass
 from pathlib import Path
 import shlex
+import sys
 from typing import Literal, Protocol
 import unicodedata
+
+import questionary
+from questionary import Choice, Separator
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from .paths import default_output_path
 
@@ -25,6 +33,7 @@ TEXT: dict[str, dict[UiLang, str]] = {
         "en": "Select an EPUB file, configure the translation model, then start conversion.",
     },
     "select": {"zh": "选择", "en": "Select"},
+    "next_action": {"zh": "下一步要做什么？", "en": "What do you want to do next?"},
     "choose_menu": {"zh": "请输入菜单数字。", "en": "Please choose a menu number."},
     "bye": {"zh": "再见。", "en": "Bye."},
     "cancelled": {"zh": "已取消。", "en": "Cancelled."},
@@ -59,6 +68,13 @@ TEXT: dict[str, dict[UiLang, str]] = {
     "menu_advanced": {"zh": "高级参数", "en": "Advanced parameters"},
     "menu_save_env": {"zh": "保存当前配置到 .env", "en": "Save current settings to .env"},
     "menu_exit": {"zh": "退出", "en": "Exit"},
+    "status": {"zh": "状态", "en": "Status"},
+    "ready": {"zh": "可以开始", "en": "ready"},
+    "needs_setup": {"zh": "还需配置", "en": "needs setup"},
+    "will_dry_run": {"zh": "开始转换会先 dry-run", "en": "conversion starts with a dry-run"},
+    "missing_items": {"zh": "缺少", "en": "missing"},
+    "current": {"zh": "当前", "en": "current"},
+    "start_with_dry_run": {"zh": "开始转换 EPUB（先 dry-run）", "en": "Start EPUB conversion (dry-run first)"},
     "ebook": {"zh": "输入 EPUB", "en": "Input EPUB"},
     "output": {"zh": "输出 EPUB", "en": "Output EPUB"},
     "model": {"zh": "翻译模型", "en": "Translation model"},
@@ -195,6 +211,20 @@ class WizardConfig:
     ui_lang: UiLang = "zh"
 
 
+@dataclass(frozen=True)
+class MenuChoice:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class MenuSection:
+    label: str
+
+
+MenuEntry = MenuChoice | MenuSection
+
+
 def t(lang: UiLang, key: str) -> str:
     return TEXT[key][lang]
 
@@ -210,31 +240,32 @@ def run_interactive(
 ) -> int:
     root = cwd or Path.cwd()
     config = initial_config(seed, root)
+    use_rich = use_questionary_ui(input_func, print_func)
+    console = Console() if use_rich else None
     try:
-        print_func(t(config.ui_lang, "title"))
-        print_func(t(config.ui_lang, "intro"))
+        print_intro(config, print_func, console)
         while True:
-            print_main_screen(config, print_func)
-            choice = prompt_text(t(config.ui_lang, "select"), "", input_func=input_func)
-            if choice == "1":
+            print_main_screen(config, print_func, console, cwd=root)
+            choice = prompt_main_action(config, cwd=root, input_func=input_func, print_func=print_func)
+            if choice == "start":
                 exit_code = start_conversion(config, cwd=root, execute=execute, input_func=input_func, print_func=print_func)
                 if exit_code is not None:
                     return exit_code
-            elif choice == "2":
+            elif choice == "ebook":
                 configure_ebook(config, cwd=root, input_func=input_func, print_func=print_func)
-            elif choice == "3":
+            elif choice == "model":
                 configure_model(config, input_func=input_func, getpass_func=getpass_func, print_func=print_func)
-            elif choice == "4":
+            elif choice == "output":
                 configure_output(config, input_func=input_func, print_func=print_func)
-            elif choice == "5":
+            elif choice == "conversion":
                 configure_conversion(config, input_func=input_func, print_func=print_func)
-            elif choice == "6":
+            elif choice == "advanced":
                 configure_advanced(config, input_func=input_func, print_func=print_func)
-            elif choice == "7":
+            elif choice == "save_env":
                 save_env_defaults(config, root, input_func=input_func, print_func=print_func)
-            elif choice == "8":
+            elif choice == "language":
                 configure_language(config, input_func=input_func, print_func=print_func)
-            elif choice == "0":
+            elif choice == "exit":
                 print_func(t(config.ui_lang, "bye"))
                 return 0
             else:
@@ -280,34 +311,121 @@ def initial_config(seed: SeedArgs, cwd: Path) -> WizardConfig:
     )
 
 
-def print_main_screen(config: WizardConfig, print_func: PrintFunc) -> None:
-    lang = config.ui_lang
+def use_questionary_ui(input_func: InputFunc, print_func: PrintFunc) -> bool:
+    return input_func is input and print_func is print and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def use_questionary_input(input_func: InputFunc) -> bool:
+    return input_func is input and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def print_intro(config: WizardConfig, print_func: PrintFunc, console: Console | None) -> None:
+    if console is not None:
+        console.print(f"[bold]{t(config.ui_lang, 'title')}[/bold]")
+        console.print(t(config.ui_lang, "intro"))
+        return
+    print_func(t(config.ui_lang, "title"))
+    print_func(t(config.ui_lang, "intro"))
+
+
+def print_main_screen(
+    config: WizardConfig,
+    print_func: PrintFunc,
+    console: Console | None = None,
+    *,
+    cwd: Path | None = None,
+) -> None:
+    if console is not None:
+        console.print()
+        console.print(render_status_panel(config, cwd=cwd))
+        return
     print_func("")
-    for line in render_status_box(config):
+    for line in render_status_box(config, cwd=cwd):
         print_func(line)
-    print_func("")
-    print_func(f"{t(lang, 'menu_common')}:")
-    print_func(f"1. {t(lang, 'menu_start')}")
-    print_func(f"2. {t(lang, 'menu_ebook')}")
-    print_func(f"3. {t(lang, 'menu_model')}")
-    print_func(f"{t(lang, 'menu_optional')}:")
-    print_func(f"4. {t(lang, 'menu_output')}")
-    print_func(f"5. {t(lang, 'menu_conversion')}")
-    print_func(f"6. {t(lang, 'menu_advanced')}")
-    print_func(f"{t(lang, 'menu_other')}:")
-    print_func(f"7. {t(lang, 'menu_save_env')}")
-    print_func(f"8. {t(lang, 'language_menu')}: {current_language_name(config)}")
-    print_func(f"0. {t(lang, 'menu_exit')}")
 
 
-def render_status_box(config: WizardConfig, width: int = 78) -> list[str]:
+def render_status_panel(config: WizardConfig, *, cwd: Path | None = None) -> Panel:
     lang = config.ui_lang
+    errors = readiness_errors(config, cwd)
+    table = Table.grid(expand=True)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column(ratio=1)
+    if errors:
+        table.add_row(t(lang, "status"), f"[yellow]{t(lang, 'needs_setup')}[/yellow]: {'; '.join(errors)}")
+    else:
+        table.add_row(t(lang, "status"), f"[green]{t(lang, 'ready')}[/green] - {t(lang, 'will_dry_run')}")
+    table.add_row(t(lang, "ebook"), path_default_text(config.input_path) or f"({t(lang, 'not_selected')})")
+    table.add_row(t(lang, "output"), display_output_path(config))
+    table.add_row(t(lang, "model"), model_summary(config, lang))
+    table.add_row(t(lang, "api_key"), api_key_status(config.api_key, lang))
+    table.add_row(t(lang, "base_url"), config.base_url)
+    table.add_row(t(lang, "languages"), f"{config.source_lang} -> {config.target_lang}")
+    table.add_row(t(lang, "layout"), f"{config.layout} ({layout_description(config.layout, lang)})")
+    table.add_row(
+        t(lang, "menu_conversion"),
+        f"{t(lang, 'mock')}: {yes_no(config.mock, lang)} | {t(lang, 'number_headings')}: {yes_no(config.number_headings, lang)}",
+    )
+    table.add_row(
+        t(lang, "menu_advanced"),
+        (
+            f"{t(lang, 'batch')}: {config.batch_size} | "
+            f"{t(lang, 'concurrency')}: {config.concurrency} | "
+            f"{t(lang, 'cache')}: {path_default_text(config.cache_path) or t(lang, 'auto')}"
+        ),
+    )
+    table.add_row(t(lang, "interface_language"), current_language_name(config))
+    border_style = "green" if not errors else "yellow"
+    return Panel(table, title=t(lang, "title"), border_style=border_style, box=box.ROUNDED)
+
+
+def prompt_main_action(
+    config: WizardConfig,
+    *,
+    cwd: Path | None,
+    input_func: InputFunc,
+    print_func: PrintFunc,
+) -> str:
+    lang = config.ui_lang
+    return prompt_menu(
+        t(lang, "next_action"),
+        [
+            MenuSection(t(lang, "menu_common")),
+            MenuChoice("start", start_menu_label(config, cwd, lang)),
+            MenuChoice("ebook", menu_label(t(lang, "menu_ebook"), f"{t(lang, 'current')}: {short_path(config.input_path, lang)}", lang)),
+            MenuChoice(
+                "model",
+                menu_label(
+                    t(lang, "menu_model"),
+                    f"{model_summary(config, lang)} / {t(lang, 'api_key')} {api_key_status(config.api_key, lang)}",
+                    lang,
+                ),
+            ),
+            MenuSection(t(lang, "menu_optional")),
+            MenuChoice("output", menu_label(t(lang, "menu_output"), display_output_path(config), lang)),
+            MenuChoice("conversion", menu_label(t(lang, "menu_conversion"), f"{config.layout}, {t(lang, 'mock')}: {yes_no(config.mock, lang)}", lang)),
+            MenuChoice("advanced", menu_label(t(lang, "menu_advanced"), f"{t(lang, 'batch')}: {config.batch_size}, {t(lang, 'concurrency')}: {config.concurrency}", lang)),
+            MenuSection(t(lang, "menu_other")),
+            MenuChoice("save_env", t(lang, "menu_save_env")),
+            MenuChoice("language", f"{t(lang, 'language_menu')}: {current_language_name(config)}"),
+            MenuChoice("exit", t(lang, "menu_exit")),
+        ],
+        input_func=input_func,
+        print_func=print_func,
+        lang=lang,
+    )
+
+
+def render_status_box(config: WizardConfig, width: int = 78, *, cwd: Path | None = None) -> list[str]:
+    lang = config.ui_lang
+    errors = readiness_errors(config, cwd)
+    status = f"{t(lang, 'needs_setup')}: {'; '.join(errors)}" if errors else f"{t(lang, 'ready')} - {t(lang, 'will_dry_run')}"
     lines = [
         t(lang, "title"),
+        f"{t(lang, 'status')}: {status}",
         f"{t(lang, 'interface_language')}: {current_language_name(config)}",
         f"{t(lang, 'ebook')}: {path_default_text(config.input_path) or '(' + t(lang, 'not_selected') + ')'}",
         f"{t(lang, 'output')}: {display_output_path(config)}",
-        f"{t(lang, 'model')}: {config.model or '(' + t(lang, 'not_set') + ')'}",
+        f"{t(lang, 'model')}: {model_summary(config, lang)}",
         f"{t(lang, 'api_key')}: {api_key_status(config.api_key, lang)}",
         f"{t(lang, 'base_url')}: {config.base_url}",
         f"{t(lang, 'languages')}: {config.source_lang} -> {config.target_lang}",
@@ -345,25 +463,121 @@ def display_width(text: str) -> int:
     return sum(2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1 for char in text)
 
 
+def readiness_errors(config: WizardConfig, cwd: Path | None) -> list[str]:
+    if cwd is not None:
+        return validate_start_config(config, cwd)
+    errors: list[str] = []
+    if config.input_path is None:
+        errors.append(t(config.ui_lang, "epub_required"))
+    elif config.input_path.suffix.lower() != ".epub":
+        errors.append(t(config.ui_lang, "epub_suffix"))
+    if not config.mock:
+        if not config.model:
+            errors.append(t(config.ui_lang, "model_required"))
+        if not config.api_key:
+            errors.append(t(config.ui_lang, "api_key_required"))
+    return errors
+
+
+def start_menu_label(config: WizardConfig, cwd: Path | None, lang: UiLang) -> str:
+    errors = readiness_errors(config, cwd)
+    if errors:
+        return f"{t(lang, 'menu_start')} ({t(lang, 'missing_items')}: {', '.join(errors)})"
+    return t(lang, "start_with_dry_run")
+
+
+def model_summary(config: WizardConfig, lang: UiLang) -> str:
+    if config.mock:
+        return f"{t(lang, 'mock_translator')}: {yes_no(True, lang)}"
+    return config.model or f"({t(lang, 'not_set')})"
+
+
+def short_path(path: Path | None, lang: UiLang) -> str:
+    return path_default_text(path) or t(lang, "not_selected")
+
+
+def menu_label(label: str, detail: str, lang: UiLang) -> str:
+    return f"{label}{parenthesize(detail, lang)}"
+
+
+def parenthesize(text: str, lang: UiLang) -> str:
+    if lang == "zh":
+        return f"（{text}）"
+    return f" ({text})"
+
+
+def prompt_menu(
+    title: str,
+    entries: list[MenuEntry],
+    *,
+    input_func: InputFunc,
+    print_func: PrintFunc,
+    lang: UiLang,
+) -> str:
+    choices = [entry for entry in entries if isinstance(entry, MenuChoice)]
+    if use_questionary_ui(input_func, print_func):
+        q_choices: list[Choice | Separator] = []
+        for entry in entries:
+            if isinstance(entry, MenuSection):
+                q_choices.append(Separator(f"-- {entry.label} --"))
+            else:
+                q_choices.append(Choice(entry.label, value=entry.value))
+        answer = questionary.select(title, choices=q_choices, qmark="").ask()
+        if answer is None:
+            raise EOFError
+        return str(answer)
+
+    while True:
+        print_func("")
+        print_func(title)
+        index_by_number: dict[str, str] = {}
+        number = 1
+        for entry in entries:
+            if isinstance(entry, MenuSection):
+                suffix = "" if entry.label.endswith(":") else ":"
+                print_func(f"{entry.label}{suffix}")
+            elif entry.value in {"back", "exit"}:
+                print_func(f"0. {entry.label}")
+            else:
+                print_func(f"{number}. {entry.label}")
+                index_by_number[str(number)] = entry.value
+                number += 1
+        raw = prompt_text(t(lang, "select"), "", input_func=input_func)
+        if raw in index_by_number:
+            return index_by_number[raw]
+        if raw == "0":
+            for entry in choices:
+                if entry.value in {"back", "exit"}:
+                    return entry.value
+        for entry in choices:
+            if raw == entry.value:
+                return raw
+        print_func(t(lang, "choose_menu"))
+
+
 def configure_language(config: WizardConfig, *, input_func: InputFunc, print_func: PrintFunc) -> None:
     while True:
         lang = config.ui_lang
-        print_func("")
-        print_func(t(lang, "language_menu_title"))
-        print_func(f"{t(lang, 'current_language')}: {current_language_name(config)}")
-        print_func("1. 中文")
-        print_func("2. English")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "1":
+        choice = prompt_menu(
+            f"{t(lang, 'language_menu_title')} ({t(lang, 'current_language')}: {current_language_name(config)})",
+            [
+                MenuChoice("zh", "中文"),
+                MenuChoice("en", "English"),
+                MenuChoice("back", t(lang, "back")),
+            ],
+            input_func=input_func,
+            print_func=print_func,
+            lang=lang,
+        )
+        if choice == "zh":
             config.ui_lang = "zh"
             print_func(t(config.ui_lang, "language_set_zh"))
             return
-        if choice == "2":
+        if choice == "en":
             config.ui_lang = "en"
             print_func(t(config.ui_lang, "language_set_en"))
             return
-        if choice == "0":
+        if choice == "back":
             return
         print_func(t(lang, "choose_menu"))
 
@@ -378,55 +592,55 @@ def configure_ebook(config: WizardConfig, *, cwd: Path, input_func: InputFunc, p
     lang = config.ui_lang
     while True:
         lang = config.ui_lang
-        choices = list_epub_paths(cwd)
-        manual_option = len(choices) + 1
-        print_func("")
-        print_func(t(lang, "menu_ebook"))
-        print_func(f"{t(lang, 'current_ebook')}: {path_default_text(config.input_path) or '(' + t(lang, 'not_selected') + ')'}")
-        if choices:
-            print_func(t(lang, "available_books"))
-            for index, choice in enumerate(choices, start=1):
-                print_func(f"  {index}. {choice}")
-        print_func(f"{manual_option}. {t(lang, 'enter_epub_path')}")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "0":
+        books = list_epub_paths(cwd)
+        entries: list[MenuEntry] = []
+        if books:
+            entries.append(MenuSection(t(lang, "available_books")))
+            entries.extend(MenuChoice(f"book:{index}", str(path)) for index, path in enumerate(books))
+        entries.extend(
+            [
+                MenuChoice("manual", t(lang, "enter_epub_path")),
+                MenuChoice("back", t(lang, "back")),
+            ]
+        )
+        title = f"{t(lang, 'menu_ebook')} ({t(lang, 'current_ebook')}: {path_default_text(config.input_path) or '(' + t(lang, 'not_selected') + ')'})"
+        choice = prompt_menu(title, entries, input_func=input_func, print_func=print_func, lang=lang)
+        if choice == "back":
             return
-        if choice.isdecimal():
-            index = int(choice)
-            if 1 <= index <= len(choices):
-                config.input_path = choices[index - 1]
-                print_func(f"{t(lang, 'selected_ebook')}: {config.input_path}")
-            elif index == manual_option:
-                config.input_path = prompt_epub_path(
-                    config.input_path,
-                    input_func=input_func,
-                    print_func=print_func,
-                    cwd=cwd,
-                    lang=lang,
-                )
-            else:
-                print_func(t(lang, "choose_menu"))
-        else:
-            print_func(t(lang, "choose_menu"))
+        if choice.startswith("book:"):
+            config.input_path = books[int(choice.split(":", 1)[1])]
+            print_func(f"{t(lang, 'selected_ebook')}: {config.input_path}")
+            continue
+        if choice == "manual":
+            config.input_path = prompt_epub_path(
+                config.input_path,
+                input_func=input_func,
+                print_func=print_func,
+                cwd=cwd,
+                lang=lang,
+            )
 
 
 def configure_output(config: WizardConfig, *, input_func: InputFunc, print_func: PrintFunc) -> None:
     while True:
         lang = config.ui_lang
-        print_func("")
-        print_func(t(lang, "output_menu_title"))
-        print_func(f"{t(lang, 'current_output')}: {display_output_path(config)}")
-        print_func(f"1. {t(lang, 'set_output_path')}")
-        print_func(f"2. {t(lang, 'auto_output_path')}")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "1":
+        choice = prompt_menu(
+            f"{t(lang, 'output_menu_title')} ({t(lang, 'current_output')}: {display_output_path(config)})",
+            [
+                MenuChoice("custom", t(lang, "set_output_path")),
+                MenuChoice("auto", t(lang, "auto_output_path")),
+                MenuChoice("back", t(lang, "back")),
+            ],
+            input_func=input_func,
+            print_func=print_func,
+            lang=lang,
+        )
+        if choice == "custom":
             config.output_path = prompt_output_path(config.output_path, input_func=input_func, lang=lang)
-        elif choice == "2":
+        elif choice == "auto":
             config.output_path = None
             print_func(t(lang, "output_auto"))
-        elif choice == "0":
+        elif choice == "back":
             return
         else:
             print_func(t(lang, "choose_menu"))
@@ -441,31 +655,36 @@ def configure_model(
 ) -> None:
     while True:
         lang = config.ui_lang
-        print_func("")
-        print_func(t(lang, "menu_model"))
-        print_func(f"{t(lang, 'base_url')}: {config.base_url}")
-        print_func(f"{t(lang, 'model')}: {config.model or '(' + t(lang, 'not_set') + ')'}")
-        print_func(f"{t(lang, 'api_key')}: {api_key_status(config.api_key, lang)}")
-        print_func(f"{t(lang, 'source_language')}: {config.source_lang}")
-        print_func(f"{t(lang, 'target_language')}: {config.target_lang}")
-        print_func(f"1. {t(lang, 'base_url')}")
-        print_func(f"2. {t(lang, 'model')}")
-        print_func(f"3. {t(lang, 'api_key')}")
-        print_func(f"4. {t(lang, 'source_language')}")
-        print_func(f"5. {t(lang, 'target_language')}")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "1":
+        title = (
+            f"{t(lang, 'menu_model')} "
+            f"({t(lang, 'model')}: {config.model or t(lang, 'not_set')}; "
+            f"{t(lang, 'api_key')}: {api_key_status(config.api_key, lang)})"
+        )
+        choice = prompt_menu(
+            title,
+            [
+                MenuChoice("base_url", f"{t(lang, 'base_url')}: {config.base_url}"),
+                MenuChoice("model", f"{t(lang, 'model')}: {config.model or '(' + t(lang, 'not_set') + ')'}"),
+                MenuChoice("api_key", f"{t(lang, 'api_key')}: {api_key_status(config.api_key, lang)}"),
+                MenuChoice("source_lang", f"{t(lang, 'source_language')}: {config.source_lang}"),
+                MenuChoice("target_lang", f"{t(lang, 'target_language')}: {config.target_lang}"),
+                MenuChoice("back", t(lang, "back")),
+            ],
+            input_func=input_func,
+            print_func=print_func,
+            lang=lang,
+        )
+        if choice == "base_url":
             config.base_url = prompt_text(t(lang, "base_url"), config.base_url, input_func=input_func)
-        elif choice == "2":
+        elif choice == "model":
             config.model = prompt_text(t(lang, "model"), config.model, input_func=input_func)
-        elif choice == "3":
+        elif choice == "api_key":
             config.api_key = prompt_secret(t(lang, "api_key"), config.api_key, getpass_func=getpass_func, lang=lang)
-        elif choice == "4":
+        elif choice == "source_lang":
             config.source_lang = prompt_text(t(lang, "source_language"), config.source_lang, input_func=input_func)
-        elif choice == "5":
+        elif choice == "target_lang":
             config.target_lang = prompt_text(t(lang, "target_language"), config.target_lang, input_func=input_func)
-        elif choice == "0":
+        elif choice == "back":
             return
         else:
             print_func(t(lang, "choose_menu"))
@@ -474,38 +693,40 @@ def configure_model(
 def configure_conversion(config: WizardConfig, *, input_func: InputFunc, print_func: PrintFunc) -> None:
     while True:
         lang = config.ui_lang
-        print_func("")
-        print_func(t(lang, "menu_conversion"))
-        print_func(f"{t(lang, 'layout')}: {config.layout} ({layout_description(config.layout, lang)})")
-        print_func(f"{t(lang, 'mock_translator')}: {yes_no(config.mock, lang)}")
-        print_func(f"{t(lang, 'number_headings')}: {yes_no(config.number_headings, lang)}")
-        print_func(f"{t(lang, 'style_css')}: {path_default_text(config.style_css) or '(' + t(lang, 'default') + ')'}")
-        print_func(f"1. {t(lang, 'layout')}")
-        print_func(f"2. {t(lang, 'toggle_mock')}")
-        print_func(f"3. {t(lang, 'toggle_heading_numbers')}")
-        print_func(f"4. {t(lang, 'style_css')}")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "1":
+        title = f"{t(lang, 'menu_conversion')} ({t(lang, 'layout')}: {config.layout} - {layout_description(config.layout, lang)})"
+        choice = prompt_menu(
+            title,
+            [
+                MenuChoice("layout", f"{t(lang, 'layout')}: {config.layout} ({layout_description(config.layout, lang)})"),
+                MenuChoice("mock", f"{t(lang, 'mock_translator')}: {yes_no(config.mock, lang)}"),
+                MenuChoice("number_headings", f"{t(lang, 'number_headings')}: {yes_no(config.number_headings, lang)}"),
+                MenuChoice("style_css", f"{t(lang, 'style_css')}: {path_default_text(config.style_css) or '(' + t(lang, 'default') + ')'}"),
+                MenuChoice("back", t(lang, "back")),
+            ],
+            input_func=input_func,
+            print_func=print_func,
+            lang=lang,
+        )
+        if choice == "layout":
             config.layout = prompt_layout(config.layout, input_func=input_func, print_func=print_func, lang=lang)
             if config.layout != "clean":
                 config.number_headings = False
                 config.style_css = None
-        elif choice == "2":
+        elif choice == "mock":
             config.mock = not config.mock
             print_func(f"{t(lang, 'mock_translator')}: {yes_no(config.mock, lang)}")
-        elif choice == "3":
+        elif choice == "number_headings":
             if config.layout != "clean":
                 print_func(t(lang, "heading_numbers_require_clean"))
             else:
                 config.number_headings = not config.number_headings
                 print_func(f"{t(lang, 'number_headings')}: {yes_no(config.number_headings, lang)}")
-        elif choice == "4":
+        elif choice == "style_css":
             if config.layout != "clean":
                 print_func(t(lang, "style_css_requires_clean"))
             else:
                 config.style_css = prompt_optional_path(t(lang, "style_css"), config.style_css, input_func=input_func)
-        elif choice == "0":
+        elif choice == "back":
             return
         else:
             print_func(t(lang, "choose_menu"))
@@ -514,60 +735,51 @@ def configure_conversion(config: WizardConfig, *, input_func: InputFunc, print_f
 def configure_advanced(config: WizardConfig, *, input_func: InputFunc, print_func: PrintFunc) -> None:
     while True:
         lang = config.ui_lang
-        print_func("")
-        print_func(t(lang, "menu_advanced"))
-        print_func(f"{t(lang, 'batch_size')}: {config.batch_size}")
-        print_func(f"{t(lang, 'concurrency')}: {config.concurrency}")
-        print_func(f"{t(lang, 'min_chars')}: {config.min_chars}")
-        print_func(f"{t(lang, 'timeout_seconds')}: {config.timeout}")
-        print_func(f"{t(lang, 'retries')}: {config.retries}")
-        print_func(f"{t(lang, 'cache_path')}: {path_default_text(config.cache_path) or t(lang, 'auto')}")
-        print_func(f"{t(lang, 'work_dir')}: {path_default_text(config.work_dir) or t(lang, 'auto')}")
-        print_func(f"{t(lang, 'limit_segments')}: {optional_text(config.limit) or t(lang, 'all')}")
-        print_func(f"{t(lang, 'terminology')}: {path_default_text(config.terminology_path) or '(' + t(lang, 'none') + ')'}")
-        print_func(f"{t(lang, 'quiet')}: {yes_no(config.quiet, lang)}")
-        print_func(f"{t(lang, 'input_price')}: {optional_text(config.input_price_per_1m) or '(' + t(lang, 'unset') + ')'}")
-        print_func(f"{t(lang, 'output_price')}: {optional_text(config.output_price_per_1m) or '(' + t(lang, 'unset') + ')'}")
-        print_func(f"{t(lang, 'price_currency')}: {config.price_currency}")
-        print_func(f"{t(lang, 'output_token_ratio')}: {config.output_token_ratio}")
-        print_func(f"1. {t(lang, 'batch_size')}")
-        print_func(f"2. {t(lang, 'concurrency')}")
-        print_func(f"3. {t(lang, 'min_chars')}")
-        print_func(f"4. {t(lang, 'timeout_seconds')}")
-        print_func(f"5. {t(lang, 'retries')}")
-        print_func(f"6. {t(lang, 'cache_path')}")
-        print_func(f"7. {t(lang, 'work_dir')}")
-        print_func(f"8. {t(lang, 'limit_segments')}")
-        print_func(f"9. {t(lang, 'terminology_csv')}")
-        print_func(f"10. {t(lang, 'toggle_quiet')}")
-        print_func(f"11. {t(lang, 'input_price')}")
-        print_func(f"12. {t(lang, 'output_price')}")
-        print_func(f"13. {t(lang, 'price_currency')}")
-        print_func(f"14. {t(lang, 'output_token_ratio')}")
-        print_func(f"0. {t(lang, 'back')}")
-        choice = prompt_text(t(lang, "select"), "", input_func=input_func)
-        if choice == "1":
+        choice = prompt_menu(
+            t(lang, "menu_advanced"),
+            [
+                MenuChoice("batch_size", f"{t(lang, 'batch_size')}: {config.batch_size}"),
+                MenuChoice("concurrency", f"{t(lang, 'concurrency')}: {config.concurrency}"),
+                MenuChoice("min_chars", f"{t(lang, 'min_chars')}: {config.min_chars}"),
+                MenuChoice("timeout", f"{t(lang, 'timeout_seconds')}: {config.timeout}"),
+                MenuChoice("retries", f"{t(lang, 'retries')}: {config.retries}"),
+                MenuChoice("cache", f"{t(lang, 'cache_path')}: {path_default_text(config.cache_path) or t(lang, 'auto')}"),
+                MenuChoice("work_dir", f"{t(lang, 'work_dir')}: {path_default_text(config.work_dir) or t(lang, 'auto')}"),
+                MenuChoice("limit", f"{t(lang, 'limit_segments')}: {optional_text(config.limit) or t(lang, 'all')}"),
+                MenuChoice("terminology", f"{t(lang, 'terminology_csv')}: {path_default_text(config.terminology_path) or '(' + t(lang, 'none') + ')'}"),
+                MenuChoice("quiet", f"{t(lang, 'toggle_quiet')}: {yes_no(config.quiet, lang)}"),
+                MenuChoice("input_price", f"{t(lang, 'input_price')}: {optional_text(config.input_price_per_1m) or '(' + t(lang, 'unset') + ')'}"),
+                MenuChoice("output_price", f"{t(lang, 'output_price')}: {optional_text(config.output_price_per_1m) or '(' + t(lang, 'unset') + ')'}"),
+                MenuChoice("price_currency", f"{t(lang, 'price_currency')}: {config.price_currency}"),
+                MenuChoice("output_token_ratio", f"{t(lang, 'output_token_ratio')}: {config.output_token_ratio}"),
+                MenuChoice("back", t(lang, "back")),
+            ],
+            input_func=input_func,
+            print_func=print_func,
+            lang=lang,
+        )
+        if choice == "batch_size":
             config.batch_size = prompt_int(t(lang, "batch_size"), config.batch_size, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "2":
+        elif choice == "concurrency":
             config.concurrency = prompt_int(t(lang, "concurrency"), config.concurrency, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "3":
+        elif choice == "min_chars":
             config.min_chars = prompt_int(t(lang, "min_chars"), config.min_chars, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "4":
+        elif choice == "timeout":
             config.timeout = prompt_int(t(lang, "timeout_seconds"), config.timeout, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "5":
+        elif choice == "retries":
             config.retries = prompt_int(t(lang, "retries"), config.retries, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "6":
+        elif choice == "cache":
             config.cache_path = prompt_optional_path(t(lang, "cache_path"), config.cache_path, input_func=input_func)
-        elif choice == "7":
+        elif choice == "work_dir":
             config.work_dir = prompt_optional_path(t(lang, "work_dir"), config.work_dir, input_func=input_func)
-        elif choice == "8":
+        elif choice == "limit":
             config.limit = prompt_optional_int(t(lang, "limit_segments"), config.limit, input_func=input_func, print_func=print_func, lang=lang)
-        elif choice == "9":
+        elif choice == "terminology":
             config.terminology_path = prompt_optional_path(t(lang, "terminology_csv"), config.terminology_path, input_func=input_func)
-        elif choice == "10":
+        elif choice == "quiet":
             config.quiet = not config.quiet
             print_func(f"{t(lang, 'quiet')}: {yes_no(config.quiet, lang)}")
-        elif choice == "11":
+        elif choice == "input_price":
             config.input_price_per_1m = prompt_optional_float(
                 t(lang, "input_price"),
                 config.input_price_per_1m,
@@ -575,7 +787,7 @@ def configure_advanced(config: WizardConfig, *, input_func: InputFunc, print_fun
                 print_func=print_func,
                 lang=lang,
             )
-        elif choice == "12":
+        elif choice == "output_price":
             config.output_price_per_1m = prompt_optional_float(
                 t(lang, "output_price"),
                 config.output_price_per_1m,
@@ -583,9 +795,9 @@ def configure_advanced(config: WizardConfig, *, input_func: InputFunc, print_fun
                 print_func=print_func,
                 lang=lang,
             )
-        elif choice == "13":
+        elif choice == "price_currency":
             config.price_currency = prompt_text(t(lang, "price_currency"), config.price_currency, input_func=input_func)
-        elif choice == "14":
+        elif choice == "output_token_ratio":
             config.output_token_ratio = prompt_float(
                 t(lang, "output_token_ratio"),
                 config.output_token_ratio,
@@ -593,7 +805,7 @@ def configure_advanced(config: WizardConfig, *, input_func: InputFunc, print_fun
                 print_func=print_func,
                 lang=lang,
             )
-        elif choice == "0":
+        elif choice == "back":
             return
         else:
             print_func(t(lang, "choose_menu"))
@@ -610,10 +822,7 @@ def start_conversion(
     lang = config.ui_lang
     errors = validate_start_config(config, cwd)
     if errors:
-        print_func("")
-        print_func(t(lang, "cannot_start"))
-        for error in errors:
-            print_func(f"  - {error}")
+        print_errors(t(lang, "cannot_start"), errors, print_func)
         return None
 
     print_summary(config, print_func)
@@ -629,6 +838,16 @@ def start_conversion(
         return None
 
     return execute(build_conversion_args(config, dry_run=False))
+
+
+def print_errors(title: str, errors: list[str], print_func: PrintFunc) -> None:
+    if print_func is print and sys.stdout.isatty():
+        Console().print(Panel("\n".join(f"- {error}" for error in errors), title=title, border_style="red", box=box.ROUNDED))
+        return
+    print_func("")
+    print_func(title)
+    for error in errors:
+        print_func(f"  - {error}")
 
 
 def validate_start_config(config: WizardConfig, cwd: Path) -> list[str]:
@@ -686,7 +905,7 @@ def prompt_epub_path(
     lang: UiLang,
 ) -> Path:
     while True:
-        value = input_func(f"{t(lang, 'input_epub')}{format_default(path_default_text(default))}: ").strip()
+        value = prompt_path_value(t(lang, "input_epub"), default, input_func=input_func).strip()
         if not value:
             if default is None:
                 print_func(t(lang, "enter_epub_required"))
@@ -702,25 +921,45 @@ def prompt_epub_path(
 
 
 def prompt_layout(default: str, *, input_func: InputFunc, print_func: PrintFunc, lang: UiLang) -> str:
+    if use_questionary_input(input_func):
+        answer = questionary.select(
+            t(lang, "layout"),
+            choices=[
+                Choice(f"preserve - {t(lang, 'preserve_desc')}", value="preserve"),
+                Choice(f"clean - {t(lang, 'clean_desc')}", value="clean"),
+            ],
+            default=default,
+            qmark="",
+        ).ask()
+        if answer is None:
+            raise EOFError
+        return str(answer)
     print_func(f"  preserve = {t(lang, 'preserve_desc')}")
     print_func(f"  clean    = {t(lang, 'clean_desc')}")
     return prompt_choice(t(lang, "layout"), ("preserve", "clean"), default, input_func=input_func, print_func=print_func, lang=lang)
 
 
 def prompt_output_path(default: Path | None, *, input_func: InputFunc, lang: UiLang) -> Path | None:
-    if default is None:
-        value = input_func(f"{t(lang, 'custom_output_epub')} ({t(lang, 'blank_for_auto')}): ").strip()
-        return Path(value).expanduser() if value else None
-    value = input_func(f"{t(lang, 'custom_output_epub')}{format_default(str(default))}: ").strip()
+    value = prompt_path_value(t(lang, "custom_output_epub"), default, input_func=input_func).strip()
     return Path(value).expanduser() if value else default
 
 
 def prompt_text(label: str, default: str, *, input_func: InputFunc) -> str:
+    if use_questionary_input(input_func):
+        answer = questionary.text(label, default=default).ask()
+        if answer is None:
+            raise EOFError
+        return answer.strip() or default
     value = input_func(f"{label}{format_default(default)}: ").strip()
     return value or default
 
 
 def prompt_secret(label: str, default: str, *, getpass_func: SecretFunc, lang: UiLang) -> str:
+    if getpass_func is getpass.getpass and sys.stdin.isatty() and sys.stdout.isatty():
+        answer = questionary.password(label).ask()
+        if answer is None:
+            raise EOFError
+        return answer.strip() or default
     value = getpass_func(f"{label}{format_default(t(lang, 'configured') if default else '')}: ").strip()
     return value or default
 
@@ -742,6 +981,11 @@ def prompt_choice(
 
 
 def confirm(label: str, *, default: bool, input_func: InputFunc, print_func: PrintFunc, lang: UiLang) -> bool:
+    if use_questionary_input(input_func):
+        answer = questionary.confirm(label, default=default).ask()
+        if answer is None:
+            raise EOFError
+        return bool(answer)
     suffix = "Y/n" if default else "y/N"
     while True:
         value = input_func(f"{label} [{suffix}]: ").strip().lower()
@@ -781,7 +1025,7 @@ def prompt_optional_int(
     lang: UiLang,
 ) -> int | None:
     while True:
-        value = input_func(f"{label}{format_default(optional_text(default))}: ").strip()
+        value = prompt_text(label, optional_text(default), input_func=input_func).strip()
         if not value:
             return default
         try:
@@ -799,7 +1043,7 @@ def prompt_optional_float(
     lang: UiLang,
 ) -> float | None:
     while True:
-        value = input_func(f"{label}{format_default(optional_text(default))}: ").strip()
+        value = prompt_text(label, optional_text(default), input_func=input_func).strip()
         if not value:
             return default
         try:
@@ -809,10 +1053,20 @@ def prompt_optional_float(
 
 
 def prompt_optional_path(label: str, default: Path | None, *, input_func: InputFunc) -> Path | None:
-    value = input_func(f"{label}{format_default(path_default_text(default))}: ").strip()
+    value = prompt_path_value(label, default, input_func=input_func).strip()
     if not value:
         return default
     return Path(value).expanduser()
+
+
+def prompt_path_value(label: str, default: Path | None, *, input_func: InputFunc) -> str:
+    default_text = path_default_text(default)
+    if use_questionary_input(input_func):
+        answer = questionary.path(label, default=default_text).ask()
+        if answer is None:
+            raise EOFError
+        return answer
+    return input_func(f"{label}{format_default(default_text)}: ")
 
 
 def optional_text(value: object | None) -> str:
@@ -832,9 +1086,23 @@ def yes_no(value: bool, lang: UiLang) -> str:
 
 
 def print_summary(config: WizardConfig, print_func: PrintFunc) -> None:
+    lang = config.ui_lang
+    command = shlex.join(["ebook-bilingual", *redact_args(build_conversion_args(config, dry_run=False))])
+    if print_func is print and sys.stdout.isatty():
+        table = Table.grid(expand=True)
+        table.add_column(style="bold", no_wrap=True)
+        table.add_column(ratio=1)
+        table.add_row(t(lang, "ebook"), path_default_text(config.input_path) or f"({t(lang, 'not_selected')})")
+        table.add_row(t(lang, "output"), display_output_path(config))
+        table.add_row(t(lang, "model"), config.model or f"({t(lang, 'not_set')})")
+        table.add_row(t(lang, "api_key"), api_key_status(config.api_key, lang))
+        table.add_row(t(lang, "layout"), f"{config.layout} ({layout_description(config.layout, lang)})")
+        table.add_row(t(lang, "command_preview"), command)
+        Console().print(Panel(table, title=t(lang, "command_preview"), border_style="green", box=box.ROUNDED))
+        return
     print_func("")
-    print_func(t(config.ui_lang, "command_preview"))
-    print_func("  " + shlex.join(["ebook-bilingual", *redact_args(build_conversion_args(config, dry_run=False))]))
+    print_func(t(lang, "command_preview"))
+    print_func("  " + command)
 
 
 def display_output_path(config: WizardConfig) -> str:
@@ -842,10 +1110,10 @@ def display_output_path(config: WizardConfig) -> str:
     if config.output_path is not None:
         return str(config.output_path)
     if config.input_path is None:
-        return f"({t(lang, 'auto_after_ebook')})"
+        return parenthesize(t(lang, "auto_after_ebook"), lang)
     if config.work_dir is not None:
-        return f"{config.work_dir / default_output_path(config.input_path).name} ({t(lang, 'auto')})"
-    return f"{default_output_path(config.input_path)} ({t(lang, 'auto')})"
+        return f"{config.work_dir / default_output_path(config.input_path).name}{parenthesize(t(lang, 'auto'), lang)}"
+    return f"{default_output_path(config.input_path)}{parenthesize(t(lang, 'auto'), lang)}"
 
 
 def api_key_status(api_key: str, lang: UiLang) -> str:
