@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import math
 import posixpath
+import re
 from pathlib import Path
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -13,6 +14,7 @@ import zipfile
 from .html_bilingual import (
     BilingualizeResult,
     Segment,
+    XHTML_NS,
     bilingualize_xhtml,
     ensure_xhtml_doctype,
     restyle_bilingual_xhtml,
@@ -22,7 +24,10 @@ from .llm import Translator
 
 CONTAINER_NS = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
 OPF_NS = {"opf": "http://www.idpf.org/2007/opf"}
+NCX_NS_URI = "http://www.daisy.org/z3986/2005/ncx/"
+NCX_NS = {"ncx": NCX_NS_URI}
 XHTML_MEDIA_TYPES = {"application/xhtml+xml", "text/html"}
+LEADING_TOC_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\.\s+")
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,111 @@ def manifest_documents(epub: zipfile.ZipFile, opf_path: str) -> list[SpineDocume
     return result
 
 
+def ncx_document_path(epub: zipfile.ZipFile, opf_path: str) -> str | None:
+    root = ET.fromstring(epub.read(opf_path))
+    spine = root.find(".//opf:spine", OPF_NS)
+    toc_id = spine.attrib.get("toc") if spine is not None else None
+    if not toc_id:
+        return None
+    for item in root.findall(".//opf:manifest/opf:item", OPF_NS):
+        if item.attrib.get("id") != toc_id:
+            continue
+        href = item.attrib.get("href")
+        if href:
+            return resolve_href(opf_path, href)
+    return None
+
+
+def resolve_toc_src(base_path: str, src: str) -> str:
+    href, separator, fragment = src.partition("#")
+    path = urllib.parse.unquote(href)
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(base_path), path))
+    if separator:
+        return f"{resolved}#{fragment}"
+    return resolved
+
+
+def number_ncx_toc(content: bytes, ncx_path: str) -> tuple[bytes, dict[str, str]]:
+    root = ET.fromstring(content)
+    heading_numbers: dict[str, str] = {}
+    nav_map = root.find(".//ncx:navMap", NCX_NS)
+    if nav_map is None:
+        return content, heading_numbers
+
+    for nav_point in nav_map.findall("ncx:navPoint", NCX_NS):
+        label = nav_label_text(nav_point)
+        number = leading_toc_number(label)
+        if number is None:
+            continue
+        record_navpoint_number(nav_point, ncx_path, number, heading_numbers)
+        number_child_navpoints(nav_point, ncx_path, [int(part) for part in number.split(".")], heading_numbers)
+
+    ET.indent(root, space="  ")
+    return serialize_ncx(root), heading_numbers
+
+
+def serialize_ncx(root: ET.Element) -> bytes:
+    ET.register_namespace("", NCX_NS_URI)
+    try:
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    finally:
+        ET.register_namespace("", XHTML_NS)
+
+
+def number_child_navpoints(
+    parent: ET.Element,
+    ncx_path: str,
+    prefix: list[int],
+    heading_numbers: dict[str, str],
+) -> None:
+    index = 0
+    for nav_point in parent.findall("ncx:navPoint", NCX_NS):
+        index += 1
+        label = nav_label_text(nav_point)
+        existing = leading_toc_number(label)
+        if existing is None:
+            number = ".".join(str(value) for value in [*prefix, index])
+            set_nav_label_text(nav_point, f"{number} {label}")
+        else:
+            number = existing
+        record_navpoint_number(nav_point, ncx_path, number, heading_numbers)
+        number_child_navpoints(nav_point, ncx_path, [int(part) for part in number.split(".")], heading_numbers)
+
+
+def nav_label_text(nav_point: ET.Element) -> str:
+    text_element = nav_point.find("ncx:navLabel/ncx:text", NCX_NS)
+    if text_element is None or text_element.text is None:
+        return ""
+    return text_element.text.strip()
+
+
+def set_nav_label_text(nav_point: ET.Element, value: str) -> None:
+    text_element = nav_point.find("ncx:navLabel/ncx:text", NCX_NS)
+    if text_element is not None:
+        text_element.text = value
+
+
+def leading_toc_number(text: str) -> str | None:
+    match = LEADING_TOC_NUMBER_RE.match(text)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def record_navpoint_number(
+    nav_point: ET.Element,
+    ncx_path: str,
+    number: str,
+    heading_numbers: dict[str, str],
+) -> None:
+    content = nav_point.find("ncx:content", NCX_NS)
+    if content is None:
+        return
+    src = content.attrib.get("src")
+    if src and "#" in src:
+        heading_numbers[resolve_toc_src(ncx_path, src)] = number
+
+
 def build_translation_plan(
     source: zipfile.ZipFile,
     *,
@@ -239,6 +349,7 @@ def convert_epub_to_bilingual(
     concurrency: int = 1,
     layout: str = "preserve",
     style_css: str | None = None,
+    number_headings: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> ConversionStats:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +366,17 @@ def convert_epub_to_bilingual(
         )
 
         modified: dict[str, bytes] = {}
+        heading_numbers: dict[str, str] | None = None
+        if layout == "clean" and number_headings:
+            ncx_path = ncx_document_path(source, find_opf_path(source))
+            if ncx_path is not None:
+                try:
+                    modified_ncx, heading_numbers = number_ncx_toc(source.read(ncx_path), ncx_path)
+                    modified[ncx_path] = modified_ncx
+                except Exception:
+                    stats.skipped_documents.append(ncx_path)
+
+        heading_counters = [0, 0, 0, 0]
         for document_path, translations in translations_by_doc.items():
             if not translations:
                 continue
@@ -270,7 +392,14 @@ def convert_epub_to_bilingual(
             if isinstance(result, BilingualizeResult):
                 content = result.content
                 if layout == "clean":
-                    content = restyle_bilingual_xhtml(content, style_css=style_css)
+                    content = restyle_bilingual_xhtml(
+                        content,
+                        style_css=style_css,
+                        number_headings=number_headings,
+                        heading_counters=heading_counters,
+                        heading_numbers=heading_numbers,
+                        document_path=document_path,
+                    )
                 modified[document_path] = content
                 stats.translated_segments += result.segments
 
@@ -279,7 +408,14 @@ def convert_epub_to_bilingual(
                 try:
                     content = ensure_xhtml_doctype(source.read(document.path))
                     if layout == "clean":
-                        content = restyle_bilingual_xhtml(content, style_css=style_css)
+                        content = restyle_bilingual_xhtml(
+                            content,
+                            style_css=style_css,
+                            number_headings=number_headings,
+                            heading_counters=heading_counters,
+                            heading_numbers=heading_numbers,
+                            document_path=document.path,
+                        )
                     modified[document.path] = content
                 except Exception:
                     stats.skipped_documents.append(document.path)
@@ -311,18 +447,31 @@ def translate_plan_segments(
     concurrency: int = 1,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, dict[str, str]]:
-    batches: list[tuple[str, list[Segment]]] = []
+    cached_count = getattr(translator, "cached_count", None)
+    batches: list[tuple[str, list[Segment], int]] = []
     for document_path, segments in segments_by_doc.items():
         for start in range(0, len(segments), batch_size):
             batch = segments[start : start + batch_size]
             if batch:
-                batches.append((document_path, batch))
+                cached_segments = cached_count([segment.text for segment in batch]) if cached_count is not None else 0
+                batches.append((document_path, batch, len(batch) - cached_segments))
 
     translations_by_doc: dict[str, dict[str, str]] = {document_path: {} for document_path in segments_by_doc}
-    total_segments = sum(len(batch) for _, batch in batches)
+    total_segments = sum(len(batch) for _, batch, _ in batches)
     total_batches = len(batches)
-    completed_segments = 0
+    completed_segments = sum(len(batch) - missing_count for _, batch, missing_count in batches)
     completed_batches = 0
+
+    if completed_segments and progress_callback is not None:
+        progress_callback(
+            TranslationProgress(
+                completed_segments=completed_segments,
+                total_segments=total_segments,
+                completed_batches=completed_batches,
+                total_batches=total_batches,
+                current_document="cached translations",
+            )
+        )
 
     def mark_done(document_path: str, translated_count: int) -> None:
         nonlocal completed_segments, completed_batches
@@ -340,15 +489,15 @@ def translate_plan_segments(
             )
 
     if concurrency <= 1 or total_batches <= 1:
-        for document_path, batch in batches:
+        for document_path, batch, missing_count in batches:
             translations_by_doc[document_path].update(translate_batch_to_dict(translator, batch))
-            mark_done(document_path, len(batch))
+            mark_done(document_path, missing_count)
         return translations_by_doc
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = {
-            executor.submit(translate_batch_to_dict, translator, batch): (document_path, len(batch))
-            for document_path, batch in batches
+            executor.submit(translate_batch_to_dict, translator, batch): (document_path, missing_count)
+            for document_path, batch, missing_count in batches
         }
         for future in as_completed(futures):
             document_path, translated_count = futures[future]

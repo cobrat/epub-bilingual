@@ -5,7 +5,8 @@ import tempfile
 import unittest
 import zipfile
 
-from ebook_bilingual.epub import convert_epub_to_bilingual
+from ebook_bilingual.epub import convert_epub_to_bilingual, number_ncx_toc, translate_plan_segments
+from ebook_bilingual.html_bilingual import Segment, restyle_bilingual_xhtml
 
 
 FIXTURE_EPUB = Path(__file__).parents[1] / "books" / "tiny.epub"
@@ -14,6 +15,14 @@ FIXTURE_EPUB = Path(__file__).parents[1] / "books" / "tiny.epub"
 class PrefixTranslator:
     def translate_batch(self, texts: list[str]) -> list[str]:
         return [f"译文：{text}" for text in texts]
+
+
+class CacheAwarePrefixTranslator(PrefixTranslator):
+    def __init__(self, cached_texts: set[str]) -> None:
+        self.cached_texts = cached_texts
+
+    def cached_count(self, texts: list[str]) -> int:
+        return sum(1 for text in texts if text in self.cached_texts)
 
 
 def write_minimal_epub(path: Path) -> None:
@@ -85,6 +94,28 @@ def write_minimal_epub(path: Path) -> None:
 
 
 class ConverterTests(unittest.TestCase):
+    def test_progress_counts_existing_cached_segments(self) -> None:
+        progress = []
+
+        result = translate_plan_segments(
+            CacheAwarePrefixTranslator({"Already cached."}),
+            {
+                "chapter.xhtml": [
+                    Segment(id="s1", text="Already cached."),
+                    Segment(id="s2", text="Needs translation."),
+                ]
+            },
+            batch_size=1,
+            progress_callback=progress.append,
+        )
+
+        self.assertEqual(result["chapter.xhtml"]["s1"], "译文：Already cached.")
+        self.assertEqual(result["chapter.xhtml"]["s2"], "译文：Needs translation.")
+        self.assertEqual(progress[0].completed_segments, 1)
+        self.assertEqual(progress[0].total_segments, 2)
+        self.assertEqual(progress[0].current_document, "cached translations")
+        self.assertEqual(progress[-1].completed_segments, 2)
+
     def test_converts_minimal_epub(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.epub"
@@ -169,6 +200,73 @@ class ConverterTests(unittest.TestCase):
                 self.assertIn('class="bilingual-clean"', chapter)
                 self.assertIn('class="bilingual-original"', chapter)
                 self.assertIn("译文：Hello world.", chapter)
+
+    def test_clean_layout_can_number_headings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "input.epub"
+            output_path = Path(tmpdir) / "output.epub"
+            write_minimal_epub(input_path)
+
+            stats = convert_epub_to_bilingual(
+                input_path,
+                output_path,
+                PrefixTranslator(),
+                batch_size=2,
+                layout="clean",
+                number_headings=True,
+            )
+
+            self.assertEqual(stats.translated_segments, 3)
+            with zipfile.ZipFile(output_path, "r") as zf:
+                chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
+                self.assertIn("bilingual-heading-number", chapter)
+                self.assertIn(">1 </span>Chapter One", chapter)
+
+    def test_number_ncx_toc_adds_child_numbers(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="chapter-1">
+      <navLabel><text>1. Chapter One</text></navLabel>
+      <content src="OPS/chapter1.xhtml"/>
+      <navPoint id="section-1">
+        <navLabel><text>Overview</text></navLabel>
+        <content src="OPS/chapter1.xhtml#overview"/>
+      </navPoint>
+    </navPoint>
+  </navMap>
+</ncx>"""
+
+        output, heading_numbers = number_ncx_toc(content, "toc.ncx")
+        text = output.decode("utf-8")
+
+        self.assertIn('<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"', text)
+        self.assertNotIn("<ncx:ncx", text)
+        self.assertIn("1.1 Overview", text)
+        self.assertEqual(heading_numbers["OPS/chapter1.xhtml#overview"], "1.1")
+
+    def test_number_ncx_toc_restores_xhtml_default_namespace(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="chapter-1">
+      <navLabel><text>1. Chapter One</text></navLabel>
+      <content src="OPS/chapter1.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>"""
+
+        number_ncx_toc(content, "toc.ncx")
+        xhtml = restyle_bilingual_xhtml(
+            b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body><p>Hello.</p></body>
+</html>"""
+        ).decode("utf-8")
+
+        self.assertIn('<html xmlns="http://www.w3.org/1999/xhtml">', xhtml)
+        self.assertNotIn("<ns0:html", xhtml)
 
 
 if __name__ == "__main__":

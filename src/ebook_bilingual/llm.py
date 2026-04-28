@@ -12,7 +12,7 @@ from typing import Protocol
 from urllib import error, request
 
 
-TRANSLATION_PROMPT_VERSION = "2026-04-27-v2"
+TRANSLATION_PROMPT_VERSION = "2026-04-27-v3"
 
 
 class Translator(Protocol):
@@ -127,6 +127,14 @@ class CachedTranslator:
 
         return [value if value is not None else "" for value in results]
 
+    def cached_count(self, texts: list[str]) -> int:
+        count = 0
+        for text in texts:
+            key = cache_key(self.model, self.source_language, self.target_language, text, self.cache_namespace)
+            if self.cache.get(key) is not None:
+                count += 1
+        return count
+
 
 class MockTranslator:
     def translate_batch(self, texts: list[str]) -> list[str]:
@@ -165,6 +173,21 @@ class OpenAICompatibleTranslator:
         if not texts:
             return []
 
+        payload = self._translation_payload(texts)
+        content = self._post_json(payload)
+        try:
+            translations = parse_json_string_array(content)
+        except (ValueError, json.JSONDecodeError):
+            if len(texts) == 1:
+                translation = parse_single_translation_response(content)
+                if translation is not None:
+                    return [translation]
+            return self._translate_one_by_one(texts)
+        if len(translations) != len(texts):
+            return self._translate_one_by_one(texts)
+        return translations
+
+    def _translation_payload(self, texts: list[str]) -> dict:
         system_prompt = (
             "You are a professional literary translator preparing bilingual EPUB text.\n\n"
             f"Translate each input segment from {self.source_language} to {self.target_language}.\n\n"
@@ -176,6 +199,7 @@ class OpenAICompatibleTranslator:
             "- Preserve the original meaning, tone, tense, names, numbers, and punctuation intent.\n"
             "- Keep paragraph boundaries: do not merge, split, summarize, or omit segments.\n"
             "- Preserve proper nouns using common established translations when they exist.\n"
+            "- Preserve placeholder tokens like __EBOOK_BILINGUAL_KEEP_0__ exactly; do not translate, remove, or reorder them.\n"
             "- Do not add translator notes, comments, headings, or extra context.\n"
             f"- If a segment is already in {self.target_language}, return it unchanged."
         )
@@ -187,7 +211,7 @@ class OpenAICompatibleTranslator:
             "task": "Translate EPUB text segments for bilingual paragraph-by-paragraph reading.",
             "segments": texts,
         }
-        payload = {
+        return {
             "model": self.model,
             "temperature": 0.2,
             "messages": [
@@ -195,21 +219,47 @@ class OpenAICompatibleTranslator:
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
         }
-        content = self._post_json(payload)
-        try:
-            translations = parse_json_string_array(content)
-        except (ValueError, json.JSONDecodeError):
-            if len(texts) == 1:
-                raise
-            return self._translate_one_by_one(texts)
-        if len(translations) != len(texts):
-            if len(texts) == 1:
-                raise ValueError("Model returned a JSON array with the wrong length.")
-            return self._translate_one_by_one(texts)
-        return translations
 
     def _translate_one_by_one(self, texts: list[str]) -> list[str]:
-        return [self.translate_batch([text])[0] for text in texts]
+        return [self._translate_single_with_format_retries(text) for text in texts]
+
+    def _translate_single_with_format_retries(self, text: str) -> str:
+        payload = self._translation_payload([text])
+        for _ in range(max(self.retries, 1)):
+            content = self._post_json(payload)
+            translation = parse_single_translation_response(content)
+            if translation is not None:
+                return translation
+
+        plain_payload = self._single_text_translation_payload(text)
+        for _ in range(max(self.retries, 1)):
+            content = self._post_json(plain_payload)
+            translation = parse_single_translation_response(content) or clean_plain_translation(content)
+            if translation:
+                return translation
+        return text
+
+    def _single_text_translation_payload(self, text: str) -> dict:
+        system_prompt = (
+            "You are a professional literary translator preparing bilingual EPUB text.\n\n"
+            f"Translate the input segment from {self.source_language} to {self.target_language}.\n\n"
+            "Requirements:\n"
+            "- Return only the translated text. No JSON, Markdown, code fences, or explanations.\n"
+            f"- Prefer fluent, natural {self.target_language} over word-for-word translation.\n"
+            "- Preserve the original meaning, tone, tense, names, numbers, and punctuation intent.\n"
+            "- Preserve placeholder tokens like __EBOOK_BILINGUAL_KEEP_0__ exactly; do not translate, remove, or reorder them.\n"
+            f"- If the segment is already in {self.target_language}, return it unchanged."
+        )
+        if self.terminology:
+            system_prompt += "\n\nTerminology:\n" + format_terminology(self.terminology)
+        return {
+            "model": self.model,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+        }
 
     def _post_json(self, payload: dict) -> str:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -249,6 +299,46 @@ def parse_json_string_array(content: str) -> list[str]:
     if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
         raise ValueError("Model response must be a JSON array of strings.")
     return data
+
+
+def parse_single_translation_response(content: str) -> str | None:
+    try:
+        values = parse_json_string_array(content)
+    except (ValueError, json.JSONDecodeError):
+        values = []
+    if len(values) == 1:
+        return values[0]
+
+    cleaned = clean_model_content(content)
+    try:
+        data = json.loads(cleaned, strict=False)
+    except json.JSONDecodeError:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(cleaned[start : end + 1], strict=False)
+        except json.JSONDecodeError:
+            return None
+
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict):
+        for key in ("translation", "translated", "target", "text", "output", "result", "content"):
+            value = data.get(key)
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def clean_plain_translation(content: str) -> str:
+    cleaned = clean_model_content(content)
+    if not cleaned:
+        return ""
+    if cleaned[0] in "[{":
+        return ""
+    return cleaned
 
 
 def clean_model_content(content: str) -> str:

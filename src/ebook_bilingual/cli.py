@@ -86,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(os.getenv("LLM_STYLE_CSS")) if os.getenv("LLM_STYLE_CSS") else None,
         help="Custom CSS file for --layout clean. Defaults to a 10.3-inch e-ink friendly style.",
     )
+    parser.add_argument(
+        "--number-headings",
+        action="store_true",
+        help="Prefix h1-h3 headings with generated hierarchical numbers in --layout clean output.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Translate only the first N segments.")
     parser.add_argument("--dry-run", action="store_true", help="Analyze the EPUB and estimate cost without calling an LLM.")
     parser.add_argument(
@@ -156,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--output-token-ratio must be > 0")
     if args.style_css is not None and args.layout != "clean":
         parser.error("--style-css requires --layout clean")
+    if args.number_headings and args.layout != "clean":
+        parser.error("--number-headings requires --layout clean")
     if args.input_price_per_1m is not None and args.input_price_per_1m < 0:
         parser.error("--input-price-per-1m must be >= 0")
     if args.output_price_per_1m is not None and args.output_price_per_1m < 0:
@@ -237,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         concurrency=args.concurrency,
         layout=args.layout,
         style_css=style_css,
+        number_headings=args.number_headings,
         progress_callback=progress_callback,
     )
 

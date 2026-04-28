@@ -28,13 +28,32 @@ body {
   background: #fff;
   color: #111;
   font-family: serif;
-  line-height: 1.5;
+  font-size: 1em;
+  line-height: 1.52;
   margin: 0;
+  orphans: 2;
   padding: 0;
+  widows: 2;
 }
 
 main {
   display: block;
+}
+
+article,
+section,
+div {
+  max-width: 100%;
+}
+
+p {
+  -epub-hyphens: auto;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+  margin: 0 0 0.85em 0;
+  text-align: justify;
+  text-align-last: left;
+  text-justify: inter-word;
 }
 
 .bilingual-pair {
@@ -44,24 +63,85 @@ main {
 }
 
 .bilingual-original {
+  break-after: avoid;
   font-size: 1em;
   font-weight: 400;
-  line-height: 1.45;
-  margin: 0 0 0.28em 0;
+  line-height: 1.48;
+  margin: 0 0 0.18em 0;
+  page-break-after: avoid;
 }
 
 .bilingual-translation {
+  break-before: avoid;
+  break-inside: avoid;
   color: #333;
   font-family: sans-serif;
-  font-size: 0.92em;
-  line-height: 1.55;
-  margin: 0;
+  font-size: 0.94em;
+  line-height: 1.58;
+  margin: 0 0 1.08em 0;
+  page-break-before: avoid;
+  page-break-inside: avoid;
+}
+
+h1.bilingual-original + .bilingual-translation,
+h2.bilingual-original + .bilingual-translation,
+h3.bilingual-original + .bilingual-translation,
+h4.bilingual-original + .bilingual-translation,
+h5.bilingual-original + .bilingual-translation,
+h6.bilingual-original + .bilingual-translation {
+  margin-bottom: 1.25em;
+}
+
+.bilingual-heading-number {
+  font-weight: 700;
+  margin-right: 0.15em;
 }
 
 img,
 svg {
+  display: block;
   height: auto;
+  margin: 0.8em auto;
   max-width: 100%;
+  width: auto;
+}
+
+figure {
+  margin: 0.9em 0;
+}
+
+figure img,
+figure svg {
+  max-width: 100%;
+  width: 100%;
+}
+
+figcaption {
+  -epub-hyphens: auto;
+  -webkit-hyphens: auto;
+  font-size: 1em;
+  hyphens: auto;
+  line-height: 1.45;
+  margin-top: 0.4em;
+  text-align: justify;
+  text-align-last: left;
+  text-justify: inter-word;
+}
+
+caption {
+  -epub-hyphens: auto;
+  -webkit-hyphens: auto;
+  caption-side: top;
+  font-size: 1.2em;
+  font-weight: 400;
+  hyphens: auto;
+  line-height: 1.38;
+  margin: 0 0 0.45em 0;
+  page-break-after: avoid;
+  padding: 0 0 0.35em 0;
+  text-align: justify;
+  text-align-last: left;
+  text-justify: inter-word;
 }
 
 pre {
@@ -78,6 +158,7 @@ pre {
 code {
   font-family: monospace;
   font-size: 0.9em;
+  overflow-wrap: anywhere;
 }
 
 table {
@@ -90,8 +171,25 @@ table {
 td,
 th {
   border: 1px solid #aaa;
+  overflow-wrap: anywhere;
   padding: 0.28em;
   vertical-align: top;
+}
+
+ul,
+ol {
+  margin: 0.7em 0 0.9em 1.3em;
+  padding: 0;
+}
+
+li {
+  -epub-hyphens: auto;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+  margin: 0.25em 0;
+  text-align: justify;
+  text-align-last: left;
+  text-justify: inter-word;
 }
 
 blockquote {
@@ -100,27 +198,99 @@ blockquote {
   padding-left: 0.7em;
 }
 
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid #999;
+  margin: 1.2em 0;
+}
+
 h1.bilingual-original {
+  break-after: avoid;
   font-size: 1.35em;
   font-weight: 700;
   line-height: 1.25;
   margin: 1.1em 0 0.4em 0;
+  page-break-after: avoid;
 }
 
 h2.bilingual-original {
+  break-after: avoid;
   font-size: 1.18em;
   font-weight: 700;
   line-height: 1.3;
   margin: 1em 0 0.35em 0;
+  page-break-after: avoid;
 }
 
 h3.bilingual-original,
 h4.bilingual-original,
 h5.bilingual-original,
 h6.bilingual-original {
+  break-after: avoid;
   font-size: 1.06em;
   font-weight: 700;
   line-height: 1.35;
   margin: 0.9em 0 0.3em 0;
+  page-break-after: avoid;
+}
+
+figure h6,
+figure h6.bilingual-original {
+  -epub-hyphens: auto;
+  -webkit-hyphens: auto;
+  break-after: avoid;
+  font-size: 1.05em;
+  font-weight: 400;
+  hyphens: auto;
+  line-height: 1.42;
+  margin: 0.45em 0 0.15em 0;
+  page-break-after: avoid;
+  text-align: justify;
+  text-align-last: left;
+  text-justify: inter-word;
+}
+
+figure h6.bilingual-original + .bilingual-translation {
+  font-size: 1em;
+  line-height: 1.45;
+  margin: 0 0 0.85em 0;
+}
+
+[data-type="note"],
+[data-type="tip"] {
+  border: 1px solid #aaa;
+  border-left: 0.3em solid #555;
+  break-inside: avoid;
+  margin: 1em 0;
+  padding: 0.65em 0.75em;
+  page-break-inside: avoid;
+}
+
+[data-type="note"] h6,
+[data-type="tip"] h6 {
+  break-after: avoid;
+  font-family: sans-serif;
+  font-size: 0.86em;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 0.45em 0;
+  page-break-after: avoid;
+}
+
+[data-type="note"] h6.bilingual-original + .bilingual-translation,
+[data-type="tip"] h6.bilingual-original + .bilingual-translation {
+  font-size: 0.82em;
+  line-height: 1.35;
+  margin: -0.25em 0 0.55em 0;
+}
+
+[data-type="note"] p:last-child,
+[data-type="tip"] p:last-child {
+  margin-bottom: 0;
 }
 """.strip()
