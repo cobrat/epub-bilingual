@@ -38,6 +38,14 @@ uv run ebook-bilingual books/book.epub \
   --target-lang "Simplified Chinese"
 ```
 
+也可以使用终端交互界面配置输入 EPUB、模型、API、排版、缓存、术语表、dry-run/mock 等选项：
+
+```bash
+uv run ebook-bilingual-tui
+```
+
+TUI 默认会优先做 dry-run，确认段落数、缓存和费用估算后，可以在界面里关闭 `Dry run` 再执行真实转换。
+
 ## 常用参数
 
 - 未指定输出文件时：自动输出到输入文件同目录，命名为 `<原名>.bilingual.epub`。

@@ -157,6 +157,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--concurrency must be >= 1")
     if args.min_chars < 1:
         parser.error("--min-chars must be >= 1")
+    if args.timeout < 1:
+        parser.error("--timeout must be >= 1")
+    if args.retries < 1:
+        parser.error("--retries must be >= 1")
+    if args.limit is not None and args.limit < 0:
+        parser.error("--limit must be >= 0")
     if args.output_token_ratio <= 0:
         parser.error("--output-token-ratio must be > 0")
     if args.style_css is not None and args.layout != "clean":

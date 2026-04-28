@@ -135,20 +135,25 @@ def spine_documents(epub: zipfile.ZipFile, opf_path: str) -> list[SpineDocument]
     documents = manifest_documents(epub, opf_path)
     spine_paths = {document.path: document for document in documents}
     root = ET.fromstring(epub.read(opf_path))
+    manifest_by_id: dict[str, SpineDocument] = {}
+    for item in root.findall(".//opf:manifest/opf:item", OPF_NS):
+        item_id = item.attrib.get("id")
+        href = item.attrib.get("href")
+        if not item_id or not href:
+            continue
+        path = resolve_href(opf_path, href)
+        document = spine_paths.get(path)
+        if document is not None:
+            manifest_by_id[item_id] = document
 
     result: list[SpineDocument] = []
     for itemref in root.findall(".//opf:spine/opf:itemref", OPF_NS):
         idref = itemref.attrib.get("idref")
         if not idref:
             continue
-        for item in root.findall(".//opf:manifest/opf:item", OPF_NS):
-            if item.attrib.get("id") == idref:
-                href = item.attrib.get("href")
-                if href:
-                    path = resolve_href(opf_path, href)
-                    if path in spine_paths:
-                        result.append(spine_paths[path])
-                break
+        document = manifest_by_id.get(idref)
+        if document is not None:
+            result.append(document)
     return result
 
 

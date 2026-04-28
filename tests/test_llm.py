@@ -37,6 +37,9 @@ class LlmTests(unittest.TestCase):
     def test_parse_json_string_array_allows_raw_newline_in_string(self) -> None:
         self.assertEqual(parse_json_string_array('["第一行\n第二行"]'), ["第一行\n第二行"])
 
+    def test_parse_json_string_array_accepts_common_object_wrapper(self) -> None:
+        self.assertEqual(parse_json_string_array('{"translations": ["一", "二"]}'), ["一", "二"])
+
     def test_translate_batch_falls_back_to_single_segments_after_bad_batch_json(self) -> None:
         translator = StubTranslator(['["unterminated', '["第一条"]', '["第二条"]'])
 

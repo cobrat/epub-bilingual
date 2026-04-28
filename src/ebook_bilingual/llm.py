@@ -285,16 +285,14 @@ class OpenAICompatibleTranslator:
 
 
 def parse_json_string_array(content: str) -> list[str]:
-    cleaned = clean_model_content(content)
+    data = parse_json_payload(content, "[", "]")
 
-    try:
-        data = json.loads(cleaned, strict=False)
-    except json.JSONDecodeError:
-        start = cleaned.find("[")
-        end = cleaned.rfind("]")
-        if start == -1 or end == -1 or end <= start:
-            raise
-        data = json.loads(cleaned[start : end + 1], strict=False)
+    if isinstance(data, dict):
+        for key in ("translations", "translated", "items", "results", "output"):
+            value = data.get(key)
+            if isinstance(value, list):
+                data = value
+                break
 
     if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
         raise ValueError("Model response must be a JSON array of strings.")
@@ -313,12 +311,8 @@ def parse_single_translation_response(content: str) -> str | None:
     try:
         data = json.loads(cleaned, strict=False)
     except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
         try:
-            data = json.loads(cleaned[start : end + 1], strict=False)
+            data = parse_json_payload(content, "{", "}")
         except json.JSONDecodeError:
             return None
 
@@ -330,6 +324,18 @@ def parse_single_translation_response(content: str) -> str | None:
             if isinstance(value, str):
                 return value
     return None
+
+
+def parse_json_payload(content: str, start_char: str, end_char: str) -> object:
+    cleaned = clean_model_content(content)
+    try:
+        return json.loads(cleaned, strict=False)
+    except json.JSONDecodeError:
+        start = cleaned.find(start_char)
+        end = cleaned.rfind(end_char)
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(cleaned[start : end + 1], strict=False)
 
 
 def clean_plain_translation(content: str) -> str:
