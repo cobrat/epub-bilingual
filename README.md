@@ -50,7 +50,9 @@ uv run ebook-bilingual --interactive
 uv run ebook-bilingual --interactive books/book.epub
 ```
 
-向导默认使用中文界面。交互式终端里会用 Rich 面板显示当前是否可以开始、还缺哪些配置、输入 EPUB、输出 EPUB、翻译模型配置和转换选项，并用 questionary 提供选择、输入、密码和确认提示；非交互管道或测试环境会自动退回普通文本菜单。菜单按使用流程分成常用操作、可选调整和其他，每个入口会带上当前值，减少来回进入子菜单确认配置。选择 EPUB 文件菜单会自动列出 `books/` 下的 EPUB，可以直接选择。开始转换会先执行 dry-run，显示段落数、缓存和费用估算，然后再询问是否继续真实转换。API Key 只显示是否已配置，不会回显；只有在单独确认后才会写入 `.env`。按 `Ctrl-C` 或 `Ctrl-D` 会直接退出，不显示错误堆栈。
+向导默认使用中文界面。交互式终端里会用 Rich 面板显示当前是否可以开始、还缺哪些配置，以及电子书、输出路径、模型和常用转换选项；并用 questionary 提供选择、输入、密码和确认提示；非交互管道或测试环境会自动退回普通文本菜单。主菜单只保留「开始 / 电子书 / 翻译与模型 / 更多」，高级项、保存 `.env` 与界面语言收在「更多」里。会话配置（不含 API Key）会自动写入 `.ebook-bilingual/wizard-last.json`，下次在同一项目目录运行向导时会恢复。若在命令行附带输入 EPUB，其路径会覆盖快照中的电子书路径。选择 EPUB 文件菜单会自动列出 `books/` 下的 EPUB，可以直接选择。开始转换会先执行 dry-run，显示段落数、缓存和费用估算，然后再询问是否继续真实转换。API Key 只显示是否已配置，不会回显；只有在单独确认后才会写入 `.env`。按 `Ctrl-C` 或 `Ctrl-D` 会直接退出，不显示错误堆栈。
+
+向导的模型厂商里包含 Ollama 本地服务，默认连接 `http://localhost:11434/v1`。选择 Ollama 后会自动读取 `http://localhost:11434/api/tags` 中已安装的模型供选择；如果没有模型，请先运行 `ollama pull <model>`。Ollama 不需要 API Key。
 
 ## 常用参数
 
@@ -58,7 +60,7 @@ uv run ebook-bilingual --interactive books/book.epub
 - `--work-dir path`：为本次转换创建独立目录。输入 EPUB、术语表和样式 CSS 会复制进去，默认输出 EPUB 和 cache 也会写到这个目录。
 - `--layout preserve`：默认模式，在原 EPUB 的 XHTML 里插入译文，尽量保留原书样式。
 - `--layout clean`：保留正文内容、图片、代码块和表格，但移除原书 CSS/行内样式，改用工具控制的样式，更适合墨水屏阅读。
-- `--style-css path.css`：给 `--layout clean` 使用自定义 CSS。示例样式见 `styles/eink-10.3.css`。
+- `--style-css path.css`：给 `--layout clean` 使用自定义 CSS。若未传参且环境变量 `LLM_STYLE_CSS` 也未设置，程序会在当前目录下查找 `styles/eink-10.3.css`（若无则按文件名取 `styles/` 下的第一个 `.css`）；都找不到时使用内置墨水屏样式。示例见 `styles/eink-10.3.css`。
 - `--dry-run`：只分析 EPUB，输出段落数、估算 token 和费用，不调用大模型。
 - `--concurrency 2`：并发翻译 batch 数。长书可从 2 或 3 开始，过高可能触发限速。
 - `--batch-size 8`：每次请求翻译的段落数，太大可能触发上下文或响应格式问题。

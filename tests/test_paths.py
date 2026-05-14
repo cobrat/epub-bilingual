@@ -4,7 +4,37 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from ebook_bilingual.paths import copy_into_work_dir, default_output_path, prepare_run_paths
+from ebook_bilingual.paths import copy_into_work_dir, default_output_path, discover_style_css, prepare_run_paths
+
+
+class DiscoverStyleCssTests(unittest.TestCase):
+    def test_prefers_eink_under_styles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            styles = root / "styles"
+            styles.mkdir()
+            (styles / "a-first.css").write_text("a {}", encoding="utf-8")
+            (styles / "eink-10.3.css").write_text("eink {}", encoding="utf-8")
+
+            self.assertEqual(discover_style_css(root), styles / "eink-10.3.css")
+
+    def test_falls_back_to_sorted_first_css(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            styles = root / "styles"
+            styles.mkdir()
+            (styles / "zzz.css").write_text("{}", encoding="utf-8")
+            (styles / "aaa.css").write_text("{}", encoding="utf-8")
+
+            self.assertEqual(discover_style_css(root), styles / "aaa.css")
+
+    def test_returns_none_without_styles_or_css(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self.assertIsNone(discover_style_css(root))
+
+            (root / "styles").mkdir()
+            self.assertIsNone(discover_style_css(root))
 
 
 class PathTests(unittest.TestCase):

@@ -9,13 +9,14 @@ from .epub import DryRunStats, TranslationProgress, analyze_epub, convert_epub_t
 from .llm import (
     CachedTranslator,
     MockTranslator,
+    is_ollama_base_url,
     OpenAICompatibleTranslator,
     TranslationCache,
     cache_key,
     load_terminology,
     terminology_fingerprint,
 )
-from .paths import copy_into_work_dir, prepare_run_paths
+from .paths import copy_into_work_dir, discover_style_css, prepare_run_paths
 from .pricing import resolve_prices
 
 
@@ -69,7 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--style-css",
         type=Path,
         default=Path(os.getenv("LLM_STYLE_CSS")) if os.getenv("LLM_STYLE_CSS") else None,
-        help="Custom CSS file for --layout clean. Defaults to a 10.3-inch e-ink friendly style.",
+        help=(
+            "CSS file for --layout clean. If omitted and LLM_STYLE_CSS is unset, uses ./styles/eink-10.3.css when "
+            "present, otherwise the first ./styles/*.css; if no styles/ CSS is found, a built-in e-ink default is used."
+        ),
     )
     conversion_group.add_argument(
         "--number-headings",
@@ -212,11 +216,17 @@ def run_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     cache_namespace = terminology_fingerprint(terminology)
 
     style_css = None
-    if args.style_css is not None:
-        if not args.style_css.exists():
-            parser.error(f"Style CSS file does not exist: {args.style_css}")
-        style_css_path = copy_into_work_dir(args.style_css, args.work_dir)
-        style_css = style_css_path.read_text(encoding="utf-8")
+    style_css_path_input: Path | None = args.style_css
+    if args.layout == "clean" and style_css_path_input is None:
+        discovered = discover_style_css(Path.cwd())
+        if discovered is not None:
+            style_css_path_input = discovered
+
+    if style_css_path_input is not None:
+        if not style_css_path_input.exists():
+            parser.error(f"Style CSS file does not exist: {style_css_path_input}")
+        style_css_path_resolved = copy_into_work_dir(style_css_path_input, args.work_dir)
+        style_css = style_css_path_resolved.read_text(encoding="utf-8")
 
     if args.mock:
         raw_translator = MockTranslator()
@@ -224,7 +234,7 @@ def run_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     else:
         if not args.model and not args.dry_run:
             parser.error("--model is required unless LLM_MODEL is set")
-        if not args.api_key and not args.dry_run:
+        if not args.api_key and not args.dry_run and not is_ollama_base_url(args.base_url):
             parser.error("--api-key is required unless LLM_API_KEY or OPENAI_API_KEY is set")
         model_name = args.model or "unknown"
         raw_translator = None
@@ -298,9 +308,9 @@ def print_progress(progress: TranslationProgress) -> None:
         return
     percent = progress.completed_segments / progress.total_segments * 100
     print(
-        f"Progress: {progress.completed_segments}/{progress.total_segments} segments "
-        f"({progress.completed_batches}/{progress.total_batches} batches, {percent:.1f}%) "
-        f"{progress.current_document}",
+        f"Progress: {progress.completed_segments}/{progress.total_segments} segments | "
+        f"batches {progress.completed_batches}/{progress.total_batches} | "
+        f"{percent:.1f}% | {progress.current_document}",
         flush=True,
     )
 

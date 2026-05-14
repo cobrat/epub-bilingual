@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import io
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from rich.console import Console
 
 from ebook_bilingual.interactive import (
     WizardConfig,
     build_conversion_args,
+    initial_config,
     redact_args,
+    render_status_panel,
     render_status_box,
     run_interactive,
+    save_wizard_snapshot,
     suggest_epub_path,
     update_env_file,
+    wizard_config_from_seed,
 )
 
 
@@ -84,6 +93,38 @@ def sample_config(api_key: str = "secret") -> WizardConfig:
 
 
 class InteractiveTests(unittest.TestCase):
+    def test_initial_config_prefers_styles_eink_for_clean_without_explicit_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"")
+            marker = ":root {}\n"
+            styles = root / "styles"
+            styles.mkdir()
+            (styles / "other.css").write_text("{}", encoding="utf-8")
+            (styles / "eink-10.3.css").write_text(marker, encoding="utf-8")
+            seed = seed_args(input_path=input_path)
+            seed.layout = "clean"
+            cfg = initial_config(seed, root)
+            self.assertEqual(cfg.layout, "clean")
+            self.assertEqual(cfg.style_css, styles / "eink-10.3.css")
+
+    def test_initial_config_keeps_explicit_style_when_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"")
+            styles = root / "styles"
+            styles.mkdir()
+            (styles / "eink-10.3.css").write_text("e{}", encoding="utf-8")
+            custom = styles / "custom.css"
+            custom.write_text("c{}", encoding="utf-8")
+            seed = seed_args(input_path=input_path)
+            seed.layout = "clean"
+            seed.style_css = custom
+            cfg = initial_config(seed, root)
+            self.assertEqual(cfg.style_css, custom)
+
     def test_suggest_epub_path_skips_generated_bilingual_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -103,6 +144,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("API Key: 已配置", text)
         self.assertIn("布局: clean", text)
         self.assertIn("批大小: 4", text)
+        self.assertNotIn("\x1b[", text)
         self.assertNotIn("secret", text)
 
     def test_status_box_shows_missing_start_requirements(self) -> None:
@@ -111,6 +153,19 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("状态: 还需配置", text)
         self.assertIn("API Key: 缺失", text)
 
+    def test_status_panel_uses_rich_color_without_api_key_value(self) -> None:
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=True, color_system="standard", width=100, highlight=False)
+
+        console.print(render_status_panel(sample_config()))
+        text = output.getvalue()
+
+        self.assertIn("\x1b[", text)
+        self.assertIn("books/book.epub", text)
+        self.assertIn("API Key", text)
+        self.assertIn("已配置", text)
+        self.assertNotIn("secret", text)
+
     def test_language_menu_explicitly_switches_to_english(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -118,9 +173,10 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "8",  # language menu
-                    "2",  # English
-                    "0",  # exit
+                    "more",
+                    "language",
+                    "en",
+                    "exit",
                 ]
             )
             outputs: list[str] = []
@@ -136,16 +192,48 @@ class InteractiveTests(unittest.TestCase):
             output_text = "\n".join(outputs)
 
         self.assertEqual(code, 0)
-        self.assertIn("常用操作:", output_text)
+        self.assertIn("输入数字选择；也可输入选项名称。", output_text)
         self.assertIn("1. 开始转换 EPUB（先 dry-run）", output_text)
-        self.assertIn("2. 选择 EPUB 文件", output_text)
-        self.assertIn("8. 界面语言 / Language: 中文", output_text)
+        self.assertIn("2. 选择电子书", output_text)
+        self.assertIn("更多…", output_text)
+        self.assertIn("更多选项（高级、环境与语言）", output_text)
         self.assertIn("界面语言 / Interface Language", output_text)
         self.assertIn("Interface language set to English.", output_text)
-        self.assertIn("Common tasks:", output_text)
+        self.assertIn("2. EPUB", output_text)
+        self.assertIn("翻译与模型", output_text)
+        self.assertIn("4. More…", output_text)
+        self.assertIn("What do you want to do next?", output_text)
         self.assertIn("1. Start EPUB conversion (dry-run first)", output_text)
-        self.assertIn("2. Select EPUB file", output_text)
-        self.assertIn("8. Language / 界面语言: English", output_text)
+        self.assertIn("Translation & model", output_text)
+
+    def test_wizard_restores_prior_session_model_from_snapshot_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            snap_cfg = replace(
+                wizard_config_from_seed(seed_args(input_path, api_key="secret"), root),
+                model="from-last-session-model",
+                base_url="https://persisted.example/v1",
+            )
+            save_wizard_snapshot(snap_cfg, root)
+            outs: list[str] = []
+
+            run_interactive(
+                seed_args(input_path),
+                execute=lambda _: 0,
+                input_func=lambda _: "exit",
+                getpass_func=lambda _: "",
+                print_func=outs.append,
+                cwd=root,
+            )
+            text = "\n".join(outs)
+
+            self.assertIn("from-last-session-model", text)
+            self.assertIn("已载入上次向导会话的配置。", text)
+            snap = root / ".ebook-bilingual" / "wizard-last.json"
+            self.assertTrue(snap.exists())
+            self.assertIn("persisted.example", snap.read_text(encoding="utf-8"))
 
     def test_redact_args_hides_api_key_value(self) -> None:
         redacted = redact_args(["book.epub", "--api-key", "secret", "--model", "test-model"])
@@ -195,11 +283,11 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "3",  # model menu
-                    "2",  # model
+                    "model",
+                    "model",
                     "new-model",
-                    "0",  # back
-                    "0",  # exit
+                    "back",
+                    "exit",
                 ]
             )
             outputs: list[str] = []
@@ -217,6 +305,161 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("翻译模型: new-model", output_text)
 
+    def test_model_menu_can_apply_provider_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            answers = iter(
+                [
+                    "model",
+                    "provider",
+                    "provider:deepseek",
+                    "back",
+                    "exit",
+                ]
+            )
+            outputs: list[str] = []
+
+            code = run_interactive(
+                seed_args(input_path, api_key="secret"),
+                execute=lambda _: 0,
+                input_func=lambda _: next(answers),
+                getpass_func=lambda _: "",
+                print_func=outputs.append,
+                cwd=root,
+            )
+            output_text = "\n".join(outputs)
+
+        self.assertEqual(code, 0)
+        self.assertIn("已应用模型厂商模板: DeepSeek", output_text)
+        self.assertIn("翻译模型: deepseek-chat", output_text)
+
+    def test_model_menu_can_apply_ollama_provider_and_select_fetched_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            answers = iter(
+                [
+                    "model",
+                    "provider",
+                    "provider:ollama",
+                    "model:qwen2.5:7b",
+                    "back",
+                    "start",
+                    "n",
+                    "exit",
+                ]
+            )
+            calls: list[list[str]] = []
+            outputs: list[str] = []
+
+            with patch("ebook_bilingual.interactive.fetch_ollama_models", return_value=["llama3.1:8b", "qwen2.5:7b"]):
+                code = run_interactive(
+                    seed_args(input_path, api_key=""),
+                    execute=lambda args: calls.append(args) or 0,
+                    input_func=lambda _: next(answers),
+                    getpass_func=lambda _: "",
+                    print_func=outputs.append,
+                    cwd=root,
+                )
+            output_text = "\n".join(outputs)
+
+        self.assertEqual(code, 0)
+        self.assertIn("已应用模型厂商模板: Ollama 本地", output_text)
+        self.assertIn("翻译模型: qwen2.5:7b", output_text)
+        self.assertIn("API Key: 不需要", output_text)
+        self.assertEqual(calls[0][calls[0].index("--base-url") + 1], "http://localhost:11434/v1")
+        self.assertEqual(calls[0][calls[0].index("--model") + 1], "qwen2.5:7b")
+        self.assertNotIn("--api-key", calls[0])
+
+    def test_ollama_provider_uses_changed_base_url_for_model_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            remote_base_url = "http://ollama.example.test:8080/v1"
+            answers = iter(
+                [
+                    "model",
+                    "provider",
+                    "provider:ollama",
+                    "base_url",
+                    remote_base_url,
+                    "model",
+                    "back",
+                    "exit",
+                ]
+            )
+            outputs: list[str] = []
+            fetched_urls: list[str] = []
+
+            def fetch_models(base_url: str) -> list[str]:
+                fetched_urls.append(base_url)
+                return ["local-model" if len(fetched_urls) == 1 else "remote-model"]
+
+            with patch("ebook_bilingual.interactive.fetch_ollama_models", side_effect=fetch_models):
+                code = run_interactive(
+                    seed_args(input_path, api_key=""),
+                    execute=lambda _: 0,
+                    input_func=lambda _: next(answers),
+                    getpass_func=lambda _: "",
+                    print_func=outputs.append,
+                    cwd=root,
+                )
+            output_text = "\n".join(outputs)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(fetched_urls, ["http://localhost:11434/v1", remote_base_url])
+        self.assertIn("选择模型厂商模板: Ollama 本地", output_text)
+        self.assertIn(f"Base URL: {remote_base_url}", output_text)
+        self.assertIn("翻译模型: remote-model", output_text)
+        self.assertIn("API Key: 不需要", output_text)
+
+    def test_advanced_menu_can_set_conversion_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            answers = iter(
+                [
+                    "more",
+                    "advanced",
+                    "batch_size",
+                    "4",
+                    "concurrency",
+                    "2",
+                    "cache",
+                    "cache.json",
+                    "work_dir",
+                    "run",
+                    "quiet",
+                    "back",
+                    "start",
+                    "n",
+                    "exit",
+                ]
+            )
+            calls: list[list[str]] = []
+
+            code = run_interactive(
+                seed_args(input_path, api_key="secret"),
+                execute=lambda args: calls.append(args) or 0,
+                input_func=lambda _: next(answers),
+                getpass_func=lambda _: "",
+                print_func=lambda _: None,
+                cwd=root,
+            )
+
+        self.assertEqual(code, 0)
+        dry_run_args = calls[0]
+        self.assertEqual(dry_run_args[dry_run_args.index("--batch-size") + 1], "4")
+        self.assertEqual(dry_run_args[dry_run_args.index("--concurrency") + 1], "2")
+        self.assertEqual(dry_run_args[dry_run_args.index("--cache") + 1], "cache.json")
+        self.assertEqual(dry_run_args[dry_run_args.index("--work-dir") + 1], "run")
+        self.assertIn("--quiet", dry_run_args)
+
     def test_output_menu_can_set_custom_output_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -224,11 +467,14 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "4",  # output menu
-                    "1",  # set output path
+                    "more",
+                    "advanced",
+                    "output",
+                    "custom",
                     "custom.epub",
-                    "0",  # back
-                    "0",  # exit
+                    "back",
+                    "back",
+                    "exit",
                 ]
             )
             outputs: list[str] = []
@@ -247,6 +493,53 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("设置输出位置", output_text)
         self.assertIn("输出 EPUB: custom.epub", output_text)
 
+    def test_existing_cache_marks_conversion_as_resumable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            (root / "book.bilingual.epub.translation-cache.json").write_text("{}", encoding="utf-8")
+            answers = iter(["start", "n", "exit"])
+            calls: list[list[str]] = []
+            outputs: list[str] = []
+
+            code = run_interactive(
+                seed_args(input_path, api_key="secret"),
+                execute=lambda args: calls.append(args) or 0,
+                input_func=lambda _: next(answers),
+                getpass_func=lambda _: "",
+                print_func=outputs.append,
+                cwd=root,
+            )
+            output_text = "\n".join(outputs)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("继续转换 EPUB（先 dry-run）", output_text)
+        self.assertIn("检测到翻译缓存，将跳过已缓存段落。", output_text)
+
+    def test_start_conversion_does_not_continue_when_dry_run_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "book.epub"
+            input_path.write_bytes(b"epub")
+            answers = iter(["start"])
+            calls: list[list[str]] = []
+            outputs: list[str] = []
+
+            code = run_interactive(
+                seed_args(input_path, api_key="secret"),
+                execute=lambda args: calls.append(args) or 7,
+                input_func=lambda _: next(answers),
+                getpass_func=lambda _: "",
+                print_func=outputs.append,
+                cwd=root,
+            )
+
+        self.assertEqual(code, 7)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("dry-run 失败，退出码 7.", "\n".join(outputs))
+
     def test_ebook_menu_can_select_detected_book_by_number(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -257,12 +550,12 @@ class InteractiveTests(unittest.TestCase):
             (books / "b.bilingual.epub").write_bytes(b"generated")
             answers = iter(
                 [
-                    "2",  # ebook menu
+                    "ebook",
                     "2",  # books/b.epub
-                    "0",  # back
-                    "1",  # start conversion
+                    "back",
+                    "start",
                     "n",  # stop after dry-run
-                    "0",  # exit
+                    "exit",
                 ]
             )
             calls: list[list[str]] = []
@@ -280,8 +573,9 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls[0][0], "books/b.epub")
         self.assertIn("books/ 下可选 EPUB:", outputs)
-        self.assertIn("1. books/a.epub", outputs)
-        self.assertIn("2. books/b.epub", outputs)
+        output_text = "\n".join(outputs)
+        self.assertIn("1. books/a.epub", output_text)
+        self.assertIn("2. books/b.epub", output_text)
 
     def test_ebook_menu_reprompts_for_invalid_manual_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -290,14 +584,14 @@ class InteractiveTests(unittest.TestCase):
             (root / "book.epub").write_bytes(b"epub")
             answers = iter(
                 [
-                    "2",  # ebook menu
-                    "1",  # manual path because no books are listed
+                    "ebook",
+                    "manual",
                     "",
                     "missing.epub",
                     "notes.txt",
                     "book.epub",
-                    "0",  # back
-                    "0",  # exit
+                    "back",
+                    "exit",
                 ]
             )
             outputs: list[str] = []
@@ -321,7 +615,7 @@ class InteractiveTests(unittest.TestCase):
             root = Path(tmpdir)
             input_path = root / "book.epub"
             input_path.write_bytes(b"epub")
-            answers = iter(["1", "0"])
+            answers = iter(["start", "exit"])
             calls: list[list[str]] = []
             outputs: list[str] = []
 
@@ -343,7 +637,7 @@ class InteractiveTests(unittest.TestCase):
             root = Path(tmpdir)
             input_path = root / "book.epub"
             input_path.write_bytes(b"epub")
-            answers = iter(["1", "n", "0"])
+            answers = iter(["start", "n", "exit"])
             outputs: list[str] = []
 
             run_interactive(
@@ -405,10 +699,11 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "7",  # save env
+                    "more",
+                    "save_env",
                     "y",  # save defaults
                     "n",  # do not save API key
-                    "0",  # exit
+                    "exit",
                 ]
             )
 

@@ -3,6 +3,22 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+_PREFERRED_CLEAN_STYLE_NAME = "eink-10.3.css"
+
+
+def discover_style_css(cwd: Path) -> Path | None:
+    """If ``cwd/styles`` exists, prefer ``eink-10.3.css``, else the first ``*.css`` sorted by filename."""
+    styles_dir = cwd / "styles"
+    if not styles_dir.is_dir():
+        return None
+
+    preferred = styles_dir / _PREFERRED_CLEAN_STYLE_NAME
+    if preferred.is_file():
+        return preferred
+
+    candidates = sorted(styles_dir.glob("*.css"))
+    return candidates[0] if candidates else None
+
 
 def default_output_path(input_path: Path) -> Path:
     suffix = input_path.suffix or ".epub"

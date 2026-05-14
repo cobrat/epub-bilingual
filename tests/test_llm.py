@@ -3,10 +3,13 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 from ebook_bilingual.llm import (
+    fetch_ollama_models,
     OpenAICompatibleTranslator,
     format_terminology,
+    is_ollama_base_url,
     load_terminology,
     parse_json_string_array,
     terminology_fingerprint,
@@ -22,6 +25,20 @@ class StubTranslator(OpenAICompatibleTranslator):
         if not self.responses:
             raise AssertionError("No stub responses left")
         return self.responses.pop(0)
+
+
+class FakeResponse:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.data
 
 
 class LlmTests(unittest.TestCase):
@@ -59,6 +76,19 @@ class LlmTests(unittest.TestCase):
         translator = StubTranslator(['{"bad": []}', '{"bad": []}', "译文"], retries=1)
 
         self.assertEqual(translator.translate_batch(["source"]), ["译文"])
+
+    def test_fetch_ollama_models_reads_local_tags(self) -> None:
+        def fake_urlopen(req: object, timeout: float) -> FakeResponse:
+            self.assertEqual(req.full_url, "http://localhost:11434/api/tags")
+            self.assertEqual(timeout, 2.0)
+            return FakeResponse(b'{"models":[{"name":"qwen2.5:7b"},{"name":"llama3.1:8b"}]}')
+
+        with patch("ebook_bilingual.llm.request.urlopen", fake_urlopen):
+            self.assertEqual(fetch_ollama_models("http://localhost:11434/v1"), ["llama3.1:8b", "qwen2.5:7b"])
+
+    def test_is_ollama_base_url_matches_default_port(self) -> None:
+        self.assertTrue(is_ollama_base_url("http://localhost:11434/v1"))
+        self.assertFalse(is_ollama_base_url("https://api.openai.com/v1"))
 
     def test_load_terminology_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

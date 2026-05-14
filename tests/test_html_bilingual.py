@@ -72,6 +72,27 @@ class HtmlBilingualTests(unittest.TestCase):
         self.assertEqual(segments[0].tag, "h1")
         self.assertEqual(segments[1].tag, "p")
 
+    def test_collect_segments_skips_container_blocks_with_nested_blocks(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <dl>
+      <dt>Term</dt>
+      <dd><p>Definition text.</p></dd>
+    </dl>
+    <figcaption><p>Caption text.</p></figcaption>
+  </body>
+</html>"""
+
+        _, segments = bilingualize_xhtml(content)
+        result = bilingualize_xhtml(content, {segment.id: f"译文：{segment.text}" for segment in segments})
+        output = result.content.decode("utf-8")
+
+        self.assertEqual([segment.text for segment in segments], ["Term", "Definition text.", "Caption text."])
+        self.assertEqual(output.count("译文：Definition text."), 1)
+        self.assertEqual(output.count("译文：Caption text."), 1)
+
     def test_collect_segments_protects_inline_code(self) -> None:
         root = ET.fromstring(
             """<html xmlns="http://www.w3.org/1999/xhtml">

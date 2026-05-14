@@ -10,9 +10,40 @@ import time
 from pathlib import Path
 from typing import Protocol
 from urllib import error, request
+from urllib.parse import urlparse
 
 
 TRANSLATION_PROMPT_VERSION = "2026-04-27-v3"
+OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+
+
+def is_ollama_base_url(base_url: str) -> bool:
+    parsed = urlparse(base_url)
+    hostname = (parsed.hostname or "").lower()
+    return parsed.port == 11434 or "ollama" in hostname
+
+
+def ollama_server_url(base_url: str) -> str:
+    url = base_url.rstrip("/")
+    for suffix in ("/v1/chat/completions", "/v1", "/api/chat", "/api/generate"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)]
+    return url
+
+
+def fetch_ollama_models(base_url: str = OLLAMA_DEFAULT_BASE_URL, *, timeout: float = 2.0) -> list[str]:
+    tags_url = f"{ollama_server_url(base_url)}/api/tags"
+    req = request.Request(tags_url, headers={"Accept": "application/json"}, method="GET")
+    with request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    names = []
+    for item in models:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            names.append(item["name"])
+        elif isinstance(item, str):
+            names.append(item)
+    return sorted(dict.fromkeys(names))
 
 
 class Translator(Protocol):
@@ -145,7 +176,7 @@ class OpenAICompatibleTranslator:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None,
         model: str,
         base_url: str = "https://api.openai.com/v1",
         source_language: str = "auto",
@@ -154,7 +185,7 @@ class OpenAICompatibleTranslator:
         retries: int = 3,
         terminology: list[TerminologyEntry] | None = None,
     ) -> None:
-        self.api_key = api_key
+        self.api_key = api_key or ""
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.source_language = source_language
@@ -264,9 +295,10 @@ class OpenAICompatibleTranslator:
     def _post_json(self, payload: dict) -> str:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):

@@ -24,6 +24,7 @@ venv/
 # Tool/runtime caches
 .cache/
 .uv-cache/
+.ebook-bilingual/
 
 # OS/editor files
 *.translation-cache.json

@@ -141,6 +141,10 @@ def has_any_class(element: ET.Element, class_names: set[str]) -> bool:
     return any(class_name in class_names for class_name in element.attrib.get("class", "").split())
 
 
+def has_descendant_block(element: ET.Element) -> bool:
+    return any(descendant is not element and local_name(descendant.tag) in BLOCK_TAGS for descendant in element.iter())
+
+
 def add_class(element: ET.Element, class_name: str) -> None:
     classes = element.attrib.get("class", "").split()
     if class_name not in classes:
@@ -257,6 +261,8 @@ def collect_segments(root: ET.Element, min_chars: int = 2) -> list[tuple[ET.Elem
     result: list[tuple[ET.Element, Segment]] = []
     for index, element in enumerate(root.iter()):
         if local_name(element.tag) not in BLOCK_TAGS:
+            continue
+        if has_descendant_block(element):
             continue
         if should_skip_element(element) or has_skipped_ancestor(element, parents) or is_already_translated(element, parents):
             continue
