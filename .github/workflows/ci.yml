@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Unit tests
+        run: uv run python -m unittest discover -s tests
+
+      - name: Build package
+        run: uv build
+
+      - name: Installed CLI smoke test
+        run: |
+          python -m venv /tmp/ebook-bilingual-venv
+          /tmp/ebook-bilingual-venv/bin/pip install dist/*.whl
+          /tmp/ebook-bilingual-venv/bin/ebook-bilingual --help
+
+      - name: Tiny EPUB smoke tests
+        run: |
+          uv run ebook-bilingual books/tiny.epub --dry-run
+          uv run ebook-bilingual books/tiny.epub /tmp/tiny.preserve.epub --mock --quiet
+          uv run ebook-bilingual books/tiny.epub /tmp/tiny.clean.epub --mock --quiet --layout clean --number-headings

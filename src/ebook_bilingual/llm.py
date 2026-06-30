@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 from urllib import error, request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 
 TRANSLATION_PROMPT_VERSION = "2026-04-27-v3"
@@ -62,6 +62,7 @@ class TerminologyEntry:
 class TranslationCache:
     path: Path | None
     values: dict[str, str]
+    dirty: bool = False
     _lock: threading.RLock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -83,18 +84,24 @@ class TranslationCache:
 
     def set(self, key: str, value: str) -> None:
         with self._lock:
+            if self.values.get(key) == value:
+                return
             self.values[key] = value
+            self.dirty = True
 
-    def save(self) -> None:
+    def save(self, *, force: bool = False) -> None:
         if self.path is None:
             return
         with self._lock:
+            if not force and not self.dirty:
+                return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
             with tmp.open("w", encoding="utf-8") as fh:
                 json.dump(self.values, fh, ensure_ascii=False, indent=2, sort_keys=True)
                 fh.write("\n")
             tmp.replace(self.path)
+            self.dirty = False
 
 
 def cache_key(
@@ -128,6 +135,7 @@ class CachedTranslator:
         source_language: str,
         target_language: str,
         cache_namespace: str = "",
+        autosave: bool = True,
     ) -> None:
         self.translator = translator
         self.cache = cache
@@ -135,36 +143,82 @@ class CachedTranslator:
         self.source_language = source_language
         self.target_language = target_language
         self.cache_namespace = cache_namespace
+        self.autosave = autosave
+        self._inflight_lock = threading.RLock()
+        self._inflight: dict[str, threading.Event] = {}
 
     def translate_batch(self, texts: list[str]) -> list[str]:
         results: list[str | None] = []
-        missing_indexes: list[int] = []
-        missing_texts: list[str] = []
+        owned_keys: list[str] = []
+        owned_texts: list[str] = []
+        owned_indexes: dict[str, list[int]] = {}
+        waiting_indexes: dict[str, tuple[threading.Event, list[int]]] = {}
         for index, text in enumerate(texts):
-            key = cache_key(self.model, self.source_language, self.target_language, text, self.cache_namespace)
+            key = self.cache_key_for_text(text)
             cached = self.cache.get(key)
             results.append(cached)
-            if cached is None:
-                missing_indexes.append(index)
-                missing_texts.append(text)
+            if cached is not None:
+                continue
+            if key in owned_indexes:
+                owned_indexes[key].append(index)
+                continue
 
-        if missing_texts:
-            translated = self.translator.translate_batch(missing_texts)
-            for index, value in zip(missing_indexes, translated, strict=True):
-                key = cache_key(self.model, self.source_language, self.target_language, texts[index], self.cache_namespace)
-                self.cache.set(key, value)
-                results[index] = value
-            self.cache.save()
+            with self._inflight_lock:
+                cached = self.cache.get(key)
+                if cached is not None:
+                    results[index] = cached
+                    continue
+                event = self._inflight.get(key)
+                if event is None:
+                    event = threading.Event()
+                    self._inflight[key] = event
+                    owned_keys.append(key)
+                    owned_texts.append(text)
+                    owned_indexes[key] = [index]
+                else:
+                    _, indexes = waiting_indexes.setdefault(key, (event, []))
+                    indexes.append(index)
+
+        try:
+            if owned_texts:
+                translated = self.translator.translate_batch(owned_texts)
+                for key, value in zip(owned_keys, translated, strict=True):
+                    self.cache.set(key, value)
+                    for index in owned_indexes[key]:
+                        results[index] = value
+                if self.autosave:
+                    self.cache.save()
+        finally:
+            if owned_keys:
+                with self._inflight_lock:
+                    for key in owned_keys:
+                        event = self._inflight.pop(key, None)
+                        if event is not None:
+                            event.set()
+
+        for key, (event, indexes) in waiting_indexes.items():
+            event.wait()
+            cached = self.cache.get(key)
+            if cached is None:
+                raise RuntimeError("Concurrent translation failed before cache was populated")
+            for index in indexes:
+                results[index] = cached
 
         return [value if value is not None else "" for value in results]
 
     def cached_count(self, texts: list[str]) -> int:
         count = 0
         for text in texts:
-            key = cache_key(self.model, self.source_language, self.target_language, text, self.cache_namespace)
+            key = self.cache_key_for_text(text)
             if self.cache.get(key) is not None:
                 count += 1
         return count
+
+    def cached_batch(self, texts: list[str]) -> list[str | None]:
+        return [self.cache.get(self.cache_key_for_text(text)) for text in texts]
+
+    def cache_key_for_text(self, text: str) -> str:
+        return cache_key(self.model, self.source_language, self.target_language, text, self.cache_namespace)
 
 
 class MockTranslator:
@@ -196,9 +250,12 @@ class OpenAICompatibleTranslator:
 
     @property
     def chat_completions_url(self) -> str:
-        if self.base_url.endswith("/chat/completions"):
+        parts = urlsplit(self.base_url)
+        path = parts.path.rstrip("/")
+        if path.endswith("/chat/completions"):
             return self.base_url
-        return f"{self.base_url}/chat/completions"
+        path = f"{path}/chat/completions" if path else "/chat/completions"
+        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
     def translate_batch(self, texts: list[str]) -> list[str]:
         if not texts:
@@ -242,7 +299,7 @@ class OpenAICompatibleTranslator:
             "task": "Translate EPUB text segments for bilingual paragraph-by-paragraph reading.",
             "segments": texts,
         }
-        return {
+        payload = {
             "model": self.model,
             "temperature": 0.2,
             "messages": [
@@ -250,6 +307,7 @@ class OpenAICompatibleTranslator:
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
         }
+        return self._adapt_payload_for_provider(payload)
 
     def _translate_one_by_one(self, texts: list[str]) -> list[str]:
         return [self._translate_single_with_format_retries(text) for text in texts]
@@ -283,7 +341,7 @@ class OpenAICompatibleTranslator:
         )
         if self.terminology:
             system_prompt += "\n\nTerminology:\n" + format_terminology(self.terminology)
-        return {
+        payload = {
             "model": self.model,
             "temperature": 0.2,
             "messages": [
@@ -291,6 +349,18 @@ class OpenAICompatibleTranslator:
                 {"role": "user", "content": text},
             ],
         }
+        return self._adapt_payload_for_provider(payload)
+
+    def _adapt_payload_for_provider(self, payload: dict) -> dict:
+        if self._is_kimi_k2():
+            payload = dict(payload)
+            payload.pop("temperature", None)
+            payload.setdefault("thinking", {"type": "disabled"})
+        return payload
+
+    def _is_kimi_k2(self) -> bool:
+        parsed = urlparse(self.base_url)
+        return (parsed.hostname or "").lower() == "api.moonshot.cn" and self.model.startswith("kimi-k2")
 
     def _post_json(self, payload: dict) -> str:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

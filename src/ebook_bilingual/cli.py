@@ -4,20 +4,17 @@ import argparse
 import os
 from pathlib import Path
 
-from .config import load_env_file
-from .epub import DryRunStats, TranslationProgress, analyze_epub, convert_epub_to_bilingual
-from .llm import (
-    CachedTranslator,
-    MockTranslator,
-    is_ollama_base_url,
-    OpenAICompatibleTranslator,
-    TranslationCache,
-    cache_key,
-    load_terminology,
-    terminology_fingerprint,
+from .app import (
+    ConversionConfigError,
+    ConversionOptions,
+    ConversionRunResult,
+    DryRunResult,
+    options_from_namespace,
+    run_conversion,
+    run_dry_run,
 )
-from .paths import copy_into_work_dir, discover_style_css, prepare_run_paths
-from .pricing import resolve_prices
+from .config import load_env_file
+from .epub import DryRunStats, SkippedDocument, TranslationProgress
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     conversion_group.add_argument(
         "--style-css",
         type=Path,
-        default=Path(os.getenv("LLM_STYLE_CSS")) if os.getenv("LLM_STYLE_CSS") else None,
+        default=optional_path_env("LLM_STYLE_CSS"),
         help=(
             "CSS file for --layout clean. If omitted and LLM_STYLE_CSS is unset, uses ./styles/eink-10.3.css when "
             "present, otherwise the first ./styles/*.css; if no styles/ CSS is found, a built-in e-ink default is used."
@@ -92,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     advanced_group.add_argument(
         "--concurrency",
         type=int,
-        default=int(os.getenv("LLM_CONCURRENCY", "1")),
+        default=int_env(parser, "LLM_CONCURRENCY", 1),
         help="Concurrent translation requests. Defaults to LLM_CONCURRENCY or 1.",
     )
     advanced_group.add_argument("--min-chars", type=int, default=2, help="Skip text shorter than this many characters.")
@@ -117,22 +114,37 @@ def build_parser() -> argparse.ArgumentParser:
     advanced_group.add_argument(
         "--terminology",
         type=Path,
-        default=Path(os.getenv("LLM_TERMINOLOGY")) if os.getenv("LLM_TERMINOLOGY") else None,
+        default=optional_path_env("LLM_TERMINOLOGY"),
         help="CSV/TSV glossary with source,target[,note] columns.",
     )
     advanced_group.add_argument("--quiet", action="store_true", help="Hide translation progress output.")
+    advanced_group.add_argument(
+        "--fail-on-skipped",
+        action="store_true",
+        help="Return a non-zero exit code when any EPUB document is skipped.",
+    )
+    advanced_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show detailed diagnostic information for skipped documents and failed operations.",
+    )
+    advanced_group.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print coarse stage timings for planning, LLM, cache, XHTML, and ZIP work.",
+    )
 
     pricing_group = parser.add_argument_group("dry-run cost estimates")
     pricing_group.add_argument(
         "--input-price-per-1m",
         type=float,
-        default=optional_float_env("LLM_INPUT_PRICE_PER_1M"),
+        default=optional_float_env("LLM_INPUT_PRICE_PER_1M", parser=parser),
         help="Input token price per 1M tokens for dry-run cost estimates.",
     )
     pricing_group.add_argument(
         "--output-price-per-1m",
         type=float,
-        default=optional_float_env("LLM_OUTPUT_PRICE_PER_1M"),
+        default=optional_float_env("LLM_OUTPUT_PRICE_PER_1M", parser=parser),
         help="Output token price per 1M tokens for dry-run cost estimates.",
     )
     pricing_group.add_argument(
@@ -143,17 +155,49 @@ def build_parser() -> argparse.ArgumentParser:
     pricing_group.add_argument(
         "--output-token-ratio",
         type=float,
-        default=float(os.getenv("LLM_OUTPUT_TOKEN_RATIO", "1.15")),
+        default=float_env(parser, "LLM_OUTPUT_TOKEN_RATIO", 1.15),
         help="Estimated output/input token ratio for dry-run. Defaults to 1.15.",
     )
     return parser
 
 
-def optional_float_env(name: str) -> float | None:
+def int_env(parser: argparse.ArgumentParser, name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        parser.error(f"{name} must be an integer")
+
+
+def float_env(parser: argparse.ArgumentParser, name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        parser.error(f"{name} must be a number")
+
+
+def optional_float_env(name: str, *, parser: argparse.ArgumentParser | None = None) -> float | None:
     value = os.getenv(name)
     if value is None or not value.strip():
         return None
-    return float(value)
+    try:
+        return float(value)
+    except ValueError:
+        if parser is not None:
+            parser.error(f"{name} must be a number")
+        raise
+
+
+def optional_path_env(name: str) -> Path | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return Path(value)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,143 +208,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.interactive:
         from .interactive import run_interactive
 
-        return run_interactive(
-            args,
-            execute=lambda cli_args: run_from_args(parser.parse_args(cli_args), parser),
-        )
-    if args.input is None:
-        parser.error("input is required unless --interactive is used")
+        return run_interactive(args)
     return run_from_args(args, parser)
 
 
 def run_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    if args.input is None:
-        parser.error("input is required unless --interactive is used")
-    if not args.input.exists():
-        parser.error(f"Input file does not exist: {args.input}")
-    if args.output is not None and args.output.resolve() == args.input.resolve():
-        parser.error("Output file must be different from input file")
-    input_path, output_path, cache_path = prepare_run_paths(args.input, args.output, args.cache, args.work_dir)
+    try:
+        options = options_from_namespace(args)
+        if options.dry_run:
+            dry_run_result = run_dry_run(options)
+            print_dry_run_result(dry_run_result, options)
+            return dry_run_result.exit_code if options.fail_on_skipped else 0
 
-    if output_path.resolve() == input_path.resolve():
-        parser.error("Output file must be different from input file")
-    if args.batch_size < 1:
-        parser.error("--batch-size must be >= 1")
-    if args.concurrency < 1:
-        parser.error("--concurrency must be >= 1")
-    if args.min_chars < 1:
-        parser.error("--min-chars must be >= 1")
-    if args.timeout < 1:
-        parser.error("--timeout must be >= 1")
-    if args.retries < 1:
-        parser.error("--retries must be >= 1")
-    if args.limit is not None and args.limit < 0:
-        parser.error("--limit must be >= 0")
-    if args.output_token_ratio <= 0:
-        parser.error("--output-token-ratio must be > 0")
-    if args.style_css is not None and args.layout != "clean":
-        parser.error("--style-css requires --layout clean")
-    if args.number_headings and args.layout != "clean":
-        parser.error("--number-headings requires --layout clean")
-    if args.input_price_per_1m is not None and args.input_price_per_1m < 0:
-        parser.error("--input-price-per-1m must be >= 0")
-    if args.output_price_per_1m is not None and args.output_price_per_1m < 0:
-        parser.error("--output-price-per-1m must be >= 0")
-
-    terminology = []
-    if args.terminology is not None:
-        if not args.terminology.exists():
-            parser.error(f"Terminology file does not exist: {args.terminology}")
-        terminology_path = copy_into_work_dir(args.terminology, args.work_dir)
-        terminology = load_terminology(terminology_path)
-    cache_namespace = terminology_fingerprint(terminology)
-
-    style_css = None
-    style_css_path_input: Path | None = args.style_css
-    if args.layout == "clean" and style_css_path_input is None:
-        discovered = discover_style_css(Path.cwd())
-        if discovered is not None:
-            style_css_path_input = discovered
-
-    if style_css_path_input is not None:
-        if not style_css_path_input.exists():
-            parser.error(f"Style CSS file does not exist: {style_css_path_input}")
-        style_css_path_resolved = copy_into_work_dir(style_css_path_input, args.work_dir)
-        style_css = style_css_path_resolved.read_text(encoding="utf-8")
-
-    if args.mock:
-        raw_translator = MockTranslator()
-        model_name = "mock"
-    else:
-        if not args.model and not args.dry_run:
-            parser.error("--model is required unless LLM_MODEL is set")
-        if not args.api_key and not args.dry_run and not is_ollama_base_url(args.base_url):
-            parser.error("--api-key is required unless LLM_API_KEY or OPENAI_API_KEY is set")
-        model_name = args.model or "unknown"
-        raw_translator = None
-        if not args.dry_run:
-            raw_translator = OpenAICompatibleTranslator(
-                api_key=args.api_key,
-                model=args.model,
-                base_url=args.base_url,
-                source_language=args.source_lang,
-                target_language=args.target_lang,
-                timeout=args.timeout,
-                retries=args.retries,
-                terminology=terminology,
-            )
-
-    cache = TranslationCache.load(cache_path)
-
-    input_price, output_price = resolve_prices(args.model, args.base_url, args.input_price_per_1m, args.output_price_per_1m)
-    if args.dry_run:
-        stats = analyze_epub(
-            input_path,
-            batch_size=args.batch_size,
-            min_chars=args.min_chars,
-            limit=args.limit,
-            output_token_ratio=args.output_token_ratio,
-            is_cached=lambda text: cache.get(
-                cache_key(model_name, args.source_lang, args.target_lang, text, cache_namespace)
-            )
-            is not None,
-        )
-        print_dry_run(stats, input_price, output_price, args.price_currency)
-        return 0
-
-    assert raw_translator is not None
-    translator = CachedTranslator(
-        raw_translator,
-        cache,
-        model=model_name,
-        source_language=args.source_lang,
-        target_language=args.target_lang,
-        cache_namespace=cache_namespace,
-    )
-
-    progress_callback = None if args.quiet else print_progress
-    stats = convert_epub_to_bilingual(
-        input_path,
-        output_path,
-        translator,
-        batch_size=args.batch_size,
-        min_chars=args.min_chars,
-        limit=args.limit,
-        concurrency=args.concurrency,
-        layout=args.layout,
-        style_css=style_css,
-        number_headings=args.number_headings,
-        progress_callback=progress_callback,
-    )
-
-    print(f"Wrote: {output_path}")
-    print(f"Documents scanned: {stats.documents}")
-    print(f"Segments translated: {stats.translated_segments}")
-    if stats.skipped_documents:
-        print("Skipped documents:")
-        for item in stats.skipped_documents:
-            print(f"  - {item}")
-    return 0
+        progress_callback = None if options.quiet else print_progress
+        conversion_result = run_conversion(options, progress_callback=progress_callback)
+        print_conversion_result(conversion_result, options)
+        return conversion_result.exit_code if options.fail_on_skipped else 0
+    except ConversionConfigError as exc:
+        parser.error(str(exc))
 
 
 def print_progress(progress: TranslationProgress) -> None:
@@ -315,24 +240,39 @@ def print_progress(progress: TranslationProgress) -> None:
     )
 
 
+def print_conversion_result(result: ConversionRunResult, options: ConversionOptions) -> None:
+    print(f"Wrote: {result.output_path}")
+    print(f"Documents: {result.stats.documents}")
+    print(f"Segments: {result.stats.translated_segments}")
+    print_skipped_documents(result.stats.skipped_documents, verbose=options.verbose)
+    if options.profile:
+        print_profile(result.profile_timings)
+
+
+def print_dry_run_result(result: DryRunResult, options: ConversionOptions) -> None:
+    print_dry_run(result.stats, result.input_price, result.output_price, result.price_currency, verbose=options.verbose)
+    if options.profile:
+        print_profile(result.profile_timings)
+
+
 def print_dry_run(
     stats: DryRunStats,
     input_price: float | None,
     output_price: float | None,
     currency: str,
+    *,
+    verbose: bool = False,
 ) -> None:
-    print("Dry run only. No LLM requests were made.")
-    print(f"Documents scanned: {stats.documents}")
+    print("Dry run")
+    print(f"Documents: {stats.documents}")
     print(f"HTML documents: {stats.html_documents}")
-    print(f"Segments to translate: {stats.segments}")
-    print(f"Characters to translate: {stats.characters}")
+    print(f"Segments: {stats.segments}")
+    print(f"Characters: {stats.characters}")
     print(f"Batches: {stats.batches}")
-    print(f"Cached segments: {stats.cached_segments}")
-    print(f"Uncached segments: {stats.uncached_segments}")
-    print(f"Estimated input tokens: {stats.estimated_input_tokens}")
-    print(f"Estimated output tokens: {stats.estimated_output_tokens}")
-    print(f"Estimated uncached input tokens: {stats.estimated_uncached_input_tokens}")
-    print(f"Estimated uncached output tokens: {stats.estimated_uncached_output_tokens}")
+    print(f"Cached: {stats.cached_segments}")
+    print(f"Uncached: {stats.uncached_segments}")
+    print(f"Tokens: input {stats.estimated_input_tokens}, output {stats.estimated_output_tokens}")
+    print(f"Uncached tokens: input {stats.estimated_uncached_input_tokens}, output {stats.estimated_uncached_output_tokens}")
     if input_price is None or output_price is None:
         print("Estimated cost: unavailable (set --input-price-per-1m and --output-price-per-1m)")
     else:
@@ -342,6 +282,27 @@ def print_dry_run(
         )
         print(f"Estimated cost: {cost:.4f} {currency}")
     if stats.skipped_documents:
-        print("Skipped documents:")
-        for item in stats.skipped_documents:
-            print(f"  - {item}")
+        print_skipped_documents(stats.skipped_documents, verbose=verbose)
+
+
+def print_skipped_documents(skipped_documents: list[SkippedDocument] | None, *, verbose: bool) -> None:
+    if not skipped_documents:
+        return
+    print("Skipped documents:")
+    for item in skipped_documents:
+        print(f"  - {item}")
+        if verbose and item.traceback:
+            for line in item.traceback.rstrip().splitlines():
+                print(f"      {line}")
+
+
+def print_profile(profile_timings: dict[str, float]) -> None:
+    print("Profile timings:")
+    preferred = ("plan", "llm", "cache_save", "html_insert_restyle", "zip_write")
+    seen = set()
+    for key in preferred:
+        if key in profile_timings:
+            seen.add(key)
+            print(f"  - {key}: {profile_timings[key]:.3f}s")
+    for key in sorted(set(profile_timings) - seen):
+        print(f"  - {key}: {profile_timings[key]:.3f}s")

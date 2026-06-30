@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,15 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from rich.console import Console
-
 from ebook_bilingual.interactive import (
     WizardConfig,
     build_conversion_args,
     initial_config,
     redact_args,
-    render_status_panel,
-    render_status_box,
+    render_home_lines,
     run_interactive,
     save_wizard_snapshot,
     suggest_epub_path,
@@ -135,36 +131,24 @@ class InteractiveTests(unittest.TestCase):
 
             self.assertEqual(suggest_epub_path(root), Path("books/book.epub"))
 
-    def test_status_box_shows_settings_without_api_key_value(self) -> None:
-        text = "\n".join(render_status_box(sample_config()))
+    def test_home_lines_show_settings_without_api_key_value(self) -> None:
+        text = "\n".join(render_home_lines(sample_config()))
 
-        self.assertIn("状态: 可以开始 - 开始转换会先 dry-run", text)
-        self.assertIn("输入 EPUB: books/book.epub", text)
-        self.assertIn("翻译模型: test-model", text)
+        self.assertIn("状态: 可以开始, 开始转换会先 dry-run", text)
+        self.assertIn("书籍: books/book.epub", text)
+        self.assertIn("输出: books/book.bilingual.epub（自动）", text)
+        self.assertIn("模型: Custom / test-model", text)
         self.assertIn("API Key: 已配置", text)
         self.assertIn("布局: clean", text)
         self.assertIn("批大小: 4", text)
         self.assertNotIn("\x1b[", text)
         self.assertNotIn("secret", text)
 
-    def test_status_box_shows_missing_start_requirements(self) -> None:
-        text = "\n".join(render_status_box(sample_config(api_key="")))
+    def test_home_lines_show_missing_start_requirements(self) -> None:
+        text = "\n".join(render_home_lines(sample_config(api_key="")))
 
         self.assertIn("状态: 还需配置", text)
         self.assertIn("API Key: 缺失", text)
-
-    def test_status_panel_uses_rich_color_without_api_key_value(self) -> None:
-        output = io.StringIO()
-        console = Console(file=output, force_terminal=True, color_system="standard", width=100, highlight=False)
-
-        console.print(render_status_panel(sample_config()))
-        text = output.getvalue()
-
-        self.assertIn("\x1b[", text)
-        self.assertIn("books/book.epub", text)
-        self.assertIn("API Key", text)
-        self.assertIn("已配置", text)
-        self.assertNotIn("secret", text)
 
     def test_language_menu_explicitly_switches_to_english(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,7 +157,6 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "more",
                     "language",
                     "en",
                     "exit",
@@ -193,18 +176,19 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("输入数字选择；也可输入选项名称。", output_text)
-        self.assertIn("1. 开始转换 EPUB（先 dry-run）", output_text)
-        self.assertIn("2. 选择电子书", output_text)
-        self.assertIn("更多…", output_text)
-        self.assertIn("更多选项（高级、环境与语言）", output_text)
+        self.assertIn("1. 开始", output_text)
+        self.assertIn("2. 电子书", output_text)
+        self.assertIn("3. 翻译", output_text)
+        self.assertIn("4. 选项", output_text)
+        self.assertNotIn("更多", output_text)
         self.assertIn("界面语言 / Interface Language", output_text)
         self.assertIn("Interface language set to English.", output_text)
-        self.assertIn("2. EPUB", output_text)
-        self.assertIn("翻译与模型", output_text)
-        self.assertIn("4. More…", output_text)
         self.assertIn("What do you want to do next?", output_text)
-        self.assertIn("1. Start EPUB conversion (dry-run first)", output_text)
-        self.assertIn("Translation & model", output_text)
+        self.assertIn("Status: Ready, dry-run first", output_text)
+        self.assertIn("1. Start", output_text)
+        self.assertIn("2. Book", output_text)
+        self.assertIn("3. Translation", output_text)
+        self.assertIn("4. Options", output_text)
 
     def test_wizard_restores_prior_session_model_from_snapshot_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -303,7 +287,7 @@ class InteractiveTests(unittest.TestCase):
             output_text = "\n".join(outputs)
 
         self.assertEqual(code, 0)
-        self.assertIn("翻译模型: new-model", output_text)
+        self.assertIn("模型: Custom / new-model", output_text)
 
     def test_model_menu_can_apply_provider_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -333,7 +317,7 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("已应用模型厂商模板: DeepSeek", output_text)
-        self.assertIn("翻译模型: deepseek-chat", output_text)
+        self.assertIn("模型: DeepSeek / deepseek-chat", output_text)
 
     def test_model_menu_can_apply_ollama_provider_and_select_fetched_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,7 +352,7 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("已应用模型厂商模板: Ollama 本地", output_text)
-        self.assertIn("翻译模型: qwen2.5:7b", output_text)
+        self.assertIn("模型: Ollama 本地 / qwen2.5:7b", output_text)
         self.assertIn("API Key: 不需要", output_text)
         self.assertEqual(calls[0][calls[0].index("--base-url") + 1], "http://localhost:11434/v1")
         self.assertEqual(calls[0][calls[0].index("--model") + 1], "qwen2.5:7b")
@@ -414,18 +398,17 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(fetched_urls, ["http://localhost:11434/v1", remote_base_url])
         self.assertIn("选择模型厂商模板: Ollama 本地", output_text)
         self.assertIn(f"Base URL: {remote_base_url}", output_text)
-        self.assertIn("翻译模型: remote-model", output_text)
+        self.assertIn("模型: Ollama 本地 / remote-model", output_text)
         self.assertIn("API Key: 不需要", output_text)
 
-    def test_advanced_menu_can_set_conversion_options(self) -> None:
+    def test_options_menu_can_set_conversion_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             input_path = root / "book.epub"
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "more",
-                    "advanced",
+                    "options",
                     "batch_size",
                     "4",
                     "concurrency",
@@ -467,8 +450,7 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "more",
-                    "advanced",
+                    "ebook",
                     "output",
                     "custom",
                     "custom.epub",
@@ -515,7 +497,7 @@ class InteractiveTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(len(calls), 1)
-        self.assertIn("继续转换 EPUB（先 dry-run）", output_text)
+        self.assertIn("状态: 可以开始, 检测到缓存，可断点继续", output_text)
         self.assertIn("检测到翻译缓存，将跳过已缓存段落。", output_text)
 
     def test_start_conversion_does_not_continue_when_dry_run_fails(self) -> None:
@@ -699,10 +681,11 @@ class InteractiveTests(unittest.TestCase):
             input_path.write_bytes(b"epub")
             answers = iter(
                 [
-                    "more",
+                    "options",
                     "save_env",
                     "y",  # save defaults
                     "n",  # do not save API key
+                    "back",
                     "exit",
                 ]
             )

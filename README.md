@@ -1,137 +1,108 @@
 # EPUB Bilingual Converter
 
-把一个 EPUB 电子书转换成“原文段落 + 译文段落”的中英双语对照 EPUB。工具会读取 EPUB 的 spine XHTML 文档，抽取段落和标题文本，调用 OpenAI-compatible `/chat/completions` 接口批量翻译，并把译文插回原段落下方。
+把 EPUB 转成“原文段落 + 译文段落”的双语 EPUB。默认使用 OpenAI-compatible `/chat/completions` 接口，也支持本地 Ollama。
 
-## 使用
-
-先用 uv 创建并同步环境：
+## Quick Start
 
 ```bash
 uv sync
-```
-
-复制本地配置文件，并把你的硅基流动 API Key 填到 `.env`：
-
-```bash
 cp .env.example .env
 ```
 
-默认配置使用硅基流动国内域名 `https://api.siliconflow.cn/v1`。如果你的 key 来自国际站，把 `.env` 里的 `LLM_BASE_URL` 改成 `https://api.siliconflow.com/v1`。
-
-```bash
-uv run ebook-bilingual books/input.epub \
-  --source-lang English \
-  --target-lang "Simplified Chinese" \
-  --terminology examples/terminology.example.csv \
-  --work-dir "books/input.run" \
-  --layout clean \
-  --style-css styles/eink-10.3.css \
-  --concurrency 2
-```
-
-也可以接任何兼容 OpenAI Chat Completions 的服务：
-
-```bash
-uv run ebook-bilingual books/book.epub \
-  --base-url "https://api.example.com/v1" \
-  --model "your-model" \
-  --target-lang "Simplified Chinese"
-```
-
-如果不想一次写完整参数，可以使用普通终端菜单式向导：
+把 API Key 填进 `.env` 后，最简单的使用方式是交互向导：
 
 ```bash
 uv run ebook-bilingual --interactive
 ```
 
-也可以先给出输入文件，让向导预填：
+向导首页是纯文本状态摘要：
+
+```text
+EPUB 双语转换器
+状态: 可以开始, 开始转换会先 dry-run
+
+书籍: books/tiny.epub
+输出: books/tiny.bilingual.epub（自动）
+模型: SiliconFlow 中国站 / Qwen/... / API Key: 已配置
+选项: 布局: preserve | 批大小: 8 | 并发: 1
+
+1. 开始
+2. 电子书
+3. 翻译
+4. 选项
+5. 界面语言 / Language: 中文
+0. 退出
+```
+
+直接命令行转换：
 
 ```bash
-uv run ebook-bilingual --interactive books/book.epub
+uv run ebook-bilingual books/input.epub
 ```
 
-向导默认使用中文界面。交互式终端里会用 Rich 面板显示当前是否可以开始、还缺哪些配置，以及电子书、输出路径、模型和常用转换选项；并用 questionary 提供选择、输入、密码和确认提示；非交互管道或测试环境会自动退回普通文本菜单。主菜单只保留「开始 / 电子书 / 翻译与模型 / 更多」，高级项、保存 `.env` 与界面语言收在「更多」里。会话配置（不含 API Key）会自动写入 `.ebook-bilingual/wizard-last.json`，下次在同一项目目录运行向导时会恢复。若在命令行附带输入 EPUB，其路径会覆盖快照中的电子书路径。选择 EPUB 文件菜单会自动列出 `books/` 下的 EPUB，可以直接选择。开始转换会先执行 dry-run，显示段落数、缓存和费用估算，然后再询问是否继续真实转换。API Key 只显示是否已配置，不会回显；只有在单独确认后才会写入 `.env`。按 `Ctrl-C` 或 `Ctrl-D` 会直接退出，不显示错误堆栈。
-
-向导的模型厂商里包含 Ollama 本地服务，默认连接 `http://localhost:11434/v1`。选择 Ollama 后会自动读取 `http://localhost:11434/api/tags` 中已安装的模型供选择；如果没有模型，请先运行 `ollama pull <model>`。Ollama 不需要 API Key。
-
-## 常用参数
-
-- 未指定输出文件时：自动输出到输入文件同目录，命名为 `<原名>.bilingual.epub`。
-- `--work-dir path`：为本次转换创建独立目录。输入 EPUB、术语表和样式 CSS 会复制进去，默认输出 EPUB 和 cache 也会写到这个目录。
-- `--layout preserve`：默认模式，在原 EPUB 的 XHTML 里插入译文，尽量保留原书样式。
-- `--layout clean`：保留正文内容、图片、代码块和表格，但移除原书 CSS/行内样式，改用工具控制的样式，更适合墨水屏阅读。
-- `--style-css path.css`：给 `--layout clean` 使用自定义 CSS。若未传参且环境变量 `LLM_STYLE_CSS` 也未设置，程序会在当前目录下查找 `styles/eink-10.3.css`（若无则按文件名取 `styles/` 下的第一个 `.css`）；都找不到时使用内置墨水屏样式。示例见 `styles/eink-10.3.css`。
-- `--dry-run`：只分析 EPUB，输出段落数、估算 token 和费用，不调用大模型。
-- `--concurrency 2`：并发翻译 batch 数。长书可从 2 或 3 开始，过高可能触发限速。
-- `--batch-size 8`：每次请求翻译的段落数，太大可能触发上下文或响应格式问题。
-- `--cache path.json`：翻译缓存，默认写到 `<output>.translation-cache.json`，中断后重跑不会重复翻译已缓存段落。
-- `--limit N`：只翻译前 N 个段落，适合先检查排版。
-- `--mock`：不调用大模型，插入占位译文，用来测试 EPUB 结构。
-- `--min-chars N`：跳过过短文本。
-- `--terminology path.csv`：读取术语表，格式为 `source,target[,note]`，翻译提示词会要求模型按术语表统一译名。
-- `.env`：本地 API Key 和默认模型配置文件，不会被 git 提交；`.env.example` 是可提交模板。
-
-## 目录结构
-
-```text
-books/                 # 本地 EPUB 和每本书的运行目录；除 tiny.epub 外不提交
-examples/              # 可复用的术语表示例配置
-scripts/               # 本地辅助脚本
-src/ebook_bilingual/   # CLI、EPUB 处理、HTML 处理、LLM 客户端等源码
-styles/                # 可复用或自定义的 EPUB 阅读 CSS
-tests/                 # 单元测试
-```
-
-## 本地结构测试
+先检查段落数、缓存和费用估算：
 
 ```bash
-uv run python -m unittest discover -s tests
+uv run ebook-bilingual books/input.epub --dry-run
 ```
 
-## Git hooks
-
-仓库使用 `.githooks/` 作为 Git hooks 目录。提交前会运行测试并检查 staged 文件，提交信息需要使用 Conventional Commits 格式：
-
-```text
-<type>[optional scope]: <description>
-```
-
-示例：
-
-```text
-feat: add bilingual EPUB conversion
-fix(cli): reject invalid batch size
-```
-
-仓库根目录有 `books/` 文件夹，可以把自己的 EPUB 放在这里。仓库里也包含一个最小 EPUB 样例：`books/tiny.epub`。可以用 mock 模式生成双语测试书，不会调用大模型：
+不调用模型，只生成测试 EPUB：
 
 ```bash
 uv run ebook-bilingual books/tiny.epub --mock
 ```
 
-如果 `.env` 已填好 API Key，也可以用真实模型只翻译前 2 个片段：
+## Providers
+
+`.env.example` 默认使用 SiliconFlow 中国站。交互向导内置 OpenAI、SiliconFlow、DeepSeek、DashScope、Kimi、Gemini、OpenRouter、Groq、Mistral、Together AI、Perplexity、Azure OpenAI 和 Ollama 模板。
+
+也可以手动指定任何兼容 OpenAI Chat Completions 的服务：
 
 ```bash
-uv run ebook-bilingual books/tiny.epub --limit 2 --batch-size 1
+uv run ebook-bilingual books/input.epub \
+  --base-url "https://api.example.com/v1" \
+  --model "your-model"
 ```
 
-长书翻译前建议先 dry-run：
+Azure OpenAI 使用自己的资源地址和部署名，例如：
 
 ```bash
-uv run ebook-bilingual books/tiny.epub --dry-run
+uv run ebook-bilingual books/input.epub \
+  --base-url "https://<resource>.openai.azure.com/openai/v1" \
+  --model "<deployment-name>"
 ```
 
-如果需要重建样例 EPUB：
+Ollama 默认使用 `http://localhost:11434/v1`，不需要 API Key。
+
+## Common Options
+
+- `--layout preserve|clean`：保留原书样式，或使用工具内置的 clean 双语排版。
+- `--style-css path.css`：给 `--layout clean` 使用自定义 CSS。
+- `--batch-size N`、`--concurrency N`：控制批量大小和并发数。
+- `--cache path.json`：指定翻译缓存；默认写到输出文件旁边。
+- `--limit N`：只翻译前 N 个片段，适合试跑。
+- `--terminology path.csv`：术语表，格式为 `source,target[,note]`。
+- `--fail-on-skipped`：有跳过文档时返回非零退出码。
+- `--verbose`：输出 skipped 的详细异常堆栈，不打印 API Key。
+- `--profile`：输出主要阶段耗时。
+
+更多参数见：
+
+```bash
+uv run ebook-bilingual --help
+```
+
+## Development
+
+```bash
+uv run ruff check .
+uv run mypy
+uv run python -m unittest discover -s tests
+uv build
+```
+
+仓库内置 `books/tiny.epub` 作为 smoke fixture。重建它：
 
 ```bash
 uv run python scripts/create_tiny_epub.py
 ```
-
-## 说明
-
-- `--layout preserve` 只修改 spine 中的 XHTML/HTML 文档，图片、CSS、字体、目录等资源会原样复制。
-- `--layout clean` 会保留正文、图片、代码块和表格，移除原书 CSS/行内样式并注入自定义 CSS。
-- 译文以 `<p class="bilingual-translation">...</p>` 插入原文段落后方，并在文档 `<head>` 注入少量 CSS。
-- EPUB 内部 XHTML 如果不是有效 XML，会被跳过并在命令输出里列出。
-- Project Gutenberg 的头尾版权样板和常见站点说明会在抽取翻译段落时跳过，避免 `--limit` 先消耗在非正文内容上。
-- 输出 EPUB 会为 manifest 中的 XHTML/HTML 文件补 `<!DOCTYPE html>`，便于 Sigil 这类编辑器打开。

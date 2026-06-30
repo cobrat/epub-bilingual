@@ -7,6 +7,7 @@ import zipfile
 
 from ebook_bilingual.epub import convert_epub_to_bilingual, number_ncx_toc, translate_plan_segments
 from ebook_bilingual.html_bilingual import Segment, restyle_bilingual_xhtml
+from ebook_bilingual.llm import CachedTranslator, TranslationCache, cache_key
 
 
 FIXTURE_EPUB = Path(__file__).parents[1] / "books" / "tiny.epub"
@@ -25,7 +26,32 @@ class CacheAwarePrefixTranslator(PrefixTranslator):
         return sum(1 for text in texts if text in self.cached_texts)
 
 
-def write_minimal_epub(path: Path) -> None:
+class CountingTranslator:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def translate_batch(self, texts: list[str]) -> list[str]:
+        self.calls.append(list(texts))
+        return [f"译文：{text}" for text in texts]
+
+
+class FailingTranslator:
+    def translate_batch(self, texts: list[str]) -> list[str]:
+        raise AssertionError(f"Unexpected raw translation call: {texts}")
+
+
+def write_minimal_epub(path: Path, chapter_content: str | None = None) -> None:
+    if chapter_content is None:
+        chapter_content = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <h1>Chapter One</h1>
+    <p>Hello world.</p>
+    <p>Another paragraph.</p>
+  </body>
+</html>"""
     with zipfile.ZipFile(path, "w") as zf:
         info = zipfile.ZipInfo("mimetype")
         info.compress_type = zipfile.ZIP_STORED
@@ -61,19 +87,7 @@ def write_minimal_epub(path: Path) -> None:
   </spine>
 </package>""",
         )
-        zf.writestr(
-            "OPS/chapter1.xhtml",
-            """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-  <head><title>Test</title></head>
-  <body>
-    <h1>Chapter One</h1>
-    <p>Hello world.</p>
-    <p>Another paragraph.</p>
-  </body>
-</html>""",
-        )
+        zf.writestr("OPS/chapter1.xhtml", chapter_content)
         zf.writestr(
             "OPS/nav.xhtml",
             """<?xml version="1.0" encoding="UTF-8"?>
@@ -91,6 +105,28 @@ def write_minimal_epub(path: Path) -> None:
   </body>
 </html>""",
         )
+
+
+def write_bad_xhtml_epub(path: Path) -> None:
+    write_minimal_epub(path, "<html><body><p>Broken")
+
+
+def write_medium_epub(path: Path, paragraphs: int = 250) -> None:
+    body = "\n".join(f"    <p>Generated paragraph {index} for performance coverage.</p>" for index in range(paragraphs))
+    write_minimal_epub(
+        path,
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Medium Test</title></head>
+  <body>
+    <h1>Medium Test Book</h1>
+{body}
+    <table><tr><th>Term</th><td>Value</td></tr></table>
+    <pre><code>do_not_translate()</code></pre>
+  </body>
+</html>""",
+    )
 
 
 class ConverterTests(unittest.TestCase):
@@ -116,6 +152,42 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(progress[0].current_document, "cached translations")
         self.assertEqual(progress[-1].completed_segments, 2)
 
+    def test_cached_batch_skips_raw_translator_call(self) -> None:
+        text = "Already cached."
+        cache = TranslationCache(path=None, values={})
+        cache.set(cache_key("model", "English", "Chinese", text), "已缓存。")
+        translator = CachedTranslator(FailingTranslator(), cache, "model", "English", "Chinese")
+
+        result = translate_plan_segments(
+            translator,
+            {"chapter.xhtml": [Segment(id="s1", text=text)]},
+            batch_size=1,
+            concurrency=2,
+        )
+
+        self.assertEqual(result["chapter.xhtml"]["s1"], "已缓存。")
+
+    def test_concurrent_duplicate_text_is_translated_once(self) -> None:
+        raw = CountingTranslator()
+        cache = TranslationCache(path=None, values={})
+        translator = CachedTranslator(raw, cache, "model", "English", "Chinese", autosave=False)
+
+        result = translate_plan_segments(
+            translator,
+            {
+                "chapter.xhtml": [
+                    Segment(id="s1", text="Repeat me."),
+                    Segment(id="s2", text="Repeat me."),
+                ]
+            },
+            batch_size=1,
+            concurrency=2,
+        )
+
+        self.assertEqual(result["chapter.xhtml"]["s1"], "译文：Repeat me.")
+        self.assertEqual(result["chapter.xhtml"]["s2"], "译文：Repeat me.")
+        self.assertEqual(raw.calls, [["Repeat me."]])
+
     def test_converts_minimal_epub(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.epub"
@@ -137,6 +209,22 @@ class ConverterTests(unittest.TestCase):
                 self.assertIn("bilingual-translation", chapter)
                 self.assertIn("译文：Hello world.", chapter)
                 self.assertEqual(zf.read("mimetype"), b"application/epub+zip")
+
+    def test_malformed_xhtml_records_structured_skipped_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "input.epub"
+            output_path = Path(tmpdir) / "output.epub"
+            write_bad_xhtml_epub(input_path)
+
+            stats = convert_epub_to_bilingual(input_path, output_path, PrefixTranslator(), batch_size=2)
+
+            self.assertEqual(stats.translated_segments, 0)
+            self.assertEqual(len(stats.skipped_documents), 1)
+            skipped = stats.skipped_documents[0]
+            self.assertEqual(skipped.path, "OPS/chapter1.xhtml")
+            self.assertEqual(skipped.stage, "collect_segments")
+            self.assertEqual(skipped.error_type, "ParseError")
+            self.assertIn("OPS/chapter1.xhtml", str(skipped))
 
     def test_limit_counts_only_inserted_segments(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -221,6 +309,28 @@ class ConverterTests(unittest.TestCase):
                 chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
                 self.assertIn("bilingual-heading-number", chapter)
                 self.assertIn(">1 </span>Chapter One", chapter)
+
+    def test_medium_generated_epub_records_profile_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "medium.epub"
+            output_path = Path(tmpdir) / "medium.output.epub"
+            profile: dict[str, float] = {}
+            write_medium_epub(input_path, paragraphs=250)
+
+            stats = convert_epub_to_bilingual(
+                input_path,
+                output_path,
+                PrefixTranslator(),
+                batch_size=20,
+                concurrency=2,
+                profile_timings=profile,
+            )
+
+            self.assertEqual(stats.translated_segments, 251)
+            self.assertFalse(stats.skipped_documents)
+            self.assertTrue(output_path.exists())
+            for key in ("plan", "llm", "html_insert_restyle", "zip_write"):
+                self.assertIn(key, profile)
 
     def test_number_ncx_toc_adds_child_numbers(self) -> None:
         content = b"""<?xml version="1.0" encoding="UTF-8"?>

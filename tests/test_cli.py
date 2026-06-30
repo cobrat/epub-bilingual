@@ -7,9 +7,36 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from ebook_bilingual.cli import build_parser, main, print_progress, run_from_args
 from ebook_bilingual.epub import ConversionStats, TranslationProgress
+
+
+FIXTURE_EPUB = Path(__file__).parents[1] / "books" / "tiny.epub"
+
+
+def write_bad_xhtml_epub(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as zf:
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(info, "application/epub+zip")
+        zf.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>""",
+        )
+        zf.writestr(
+            "OPS/content.opf",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest><item id="chap1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="chap1"/></spine>
+</package>""",
+        )
+        zf.writestr("OPS/chapter1.xhtml", "<html><body><p>Broken")
 
 
 class CliTests(unittest.TestCase):
@@ -79,7 +106,7 @@ class CliTests(unittest.TestCase):
             args = parser.parse_args([str(input_path), "--mock", "--quiet"])
 
             with redirect_stdout(io.StringIO()), patch(
-                "ebook_bilingual.cli.convert_epub_to_bilingual",
+                "ebook_bilingual.app.convert_epub_to_bilingual",
                 return_value=ConversionStats(documents=1, translated_segments=1),
             ) as convert:
                 self.assertEqual(run_from_args(args, parser), 0)
@@ -95,7 +122,7 @@ class CliTests(unittest.TestCase):
             args.api_key = None
 
             with redirect_stdout(io.StringIO()), patch(
-                "ebook_bilingual.cli.convert_epub_to_bilingual",
+                "ebook_bilingual.app.convert_epub_to_bilingual",
                 return_value=ConversionStats(documents=1, translated_segments=1),
             ):
                 self.assertEqual(run_from_args(args, parser), 0)
@@ -118,7 +145,7 @@ class CliTests(unittest.TestCase):
                 args = parser.parse_args([str(input_path), "--mock", "--quiet", "--layout", "clean"])
 
                 with redirect_stdout(io.StringIO()), patch(
-                    "ebook_bilingual.cli.convert_epub_to_bilingual",
+                    "ebook_bilingual.app.convert_epub_to_bilingual",
                     return_value=ConversionStats(documents=1, translated_segments=1),
                 ) as convert:
                     self.assertEqual(run_from_args(args, parser), 0)
@@ -127,6 +154,102 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(convert.call_args.kwargs["style_css"], marker)
             finally:
                 os.chdir(old_cwd)
+
+    def test_fail_on_skipped_returns_nonzero_for_malformed_xhtml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "bad.epub"
+            output_path = Path(tmpdir) / "bad.out.epub"
+            write_bad_xhtml_epub(input_path)
+
+            with redirect_stdout(io.StringIO()):
+                code = main([str(input_path), str(output_path), "--mock", "--fail-on-skipped"])
+
+        self.assertEqual(code, 1)
+
+    def test_verbose_skipped_output_does_not_include_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "bad.epub"
+            output_path = Path(tmpdir) / "bad.out.epub"
+            write_bad_xhtml_epub(input_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                code = main(
+                    [
+                        str(input_path),
+                        str(output_path),
+                        "--mock",
+                        "--verbose",
+                        "--api-key",
+                        "secret-key-value",
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Skipped documents:", output)
+        self.assertIn("collect_segments", output)
+        self.assertNotIn("secret-key-value", output)
+
+    def test_verbose_dry_run_skipped_output_does_not_include_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "bad.epub"
+            write_bad_xhtml_epub(input_path)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                code = main([str(input_path), "--dry-run", "--verbose", "--api-key", "secret-key-value"])
+
+        self.assertEqual(code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Skipped documents:", output)
+        self.assertIn("collect_segments", output)
+        self.assertNotIn("secret-key-value", output)
+
+    def test_tiny_epub_dry_run_cli_smoke(self) -> None:
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            code = main([str(FIXTURE_EPUB), "--dry-run"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Dry run", stdout.getvalue())
+        self.assertIn("Segments: 3", stdout.getvalue())
+
+    def test_tiny_epub_mock_preserve_cli_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "tiny.preserve.epub"
+
+            with redirect_stdout(io.StringIO()):
+                code = main([str(FIXTURE_EPUB), str(output_path), "--mock", "--quiet"])
+
+            self.assertEqual(code, 0)
+            with zipfile.ZipFile(output_path, "r") as zf:
+                chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
+            self.assertIn("[译文占位] Tiny Test Book", chapter)
+
+    def test_tiny_epub_mock_clean_numbered_cli_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "tiny.clean.epub"
+
+            with redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        str(FIXTURE_EPUB),
+                        str(output_path),
+                        "--mock",
+                        "--quiet",
+                        "--layout",
+                        "clean",
+                        "--number-headings",
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            with zipfile.ZipFile(output_path, "r") as zf:
+                chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
+            self.assertIn("bilingual-clean-style", chapter)
+            self.assertIn("bilingual-heading-number", chapter)
 
 
 if __name__ == "__main__":

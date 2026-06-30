@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 import math
 import posixpath
 import re
 from pathlib import Path
+import time
+import traceback
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
@@ -36,15 +38,24 @@ class SpineDocument:
     media_type: str
 
 
+@dataclass(frozen=True)
+class SkippedDocument:
+    path: str
+    stage: str
+    error_type: str
+    message: str
+    traceback: str = ""
+
+    def __str__(self) -> str:
+        detail = f"{self.error_type}: {self.message}" if self.message else self.error_type
+        return f"{self.path} [{self.stage}: {detail}]"
+
+
 @dataclass
 class ConversionStats:
     documents: int = 0
     translated_segments: int = 0
-    skipped_documents: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.skipped_documents is None:
-            self.skipped_documents = []
+    skipped_documents: list[SkippedDocument] = field(default_factory=list)
 
 
 @dataclass
@@ -52,7 +63,7 @@ class TranslationPlan:
     documents: list[SpineDocument]
     html_documents: list[SpineDocument]
     segments_by_doc: dict[str, list[Segment]]
-    skipped_documents: list[str]
+    skipped_documents: list[SkippedDocument]
 
     @property
     def total_segments(self) -> int:
@@ -73,11 +84,7 @@ class DryRunStats:
     estimated_output_tokens: int
     batches: int
     cached_segments: int = 0
-    skipped_documents: list[str] | None = None
-
-    def __post_init__(self) -> None:
-        if self.skipped_documents is None:
-            self.skipped_documents = []
+    skipped_documents: list[SkippedDocument] = field(default_factory=list)
 
     @property
     def uncached_segments(self) -> int:
@@ -108,6 +115,22 @@ class TranslationProgress:
 
 
 ProgressCallback = Callable[[TranslationProgress], None]
+
+
+def skipped_document(path: str, stage: str, exc: BaseException) -> SkippedDocument:
+    return SkippedDocument(
+        path=path,
+        stage=stage,
+        error_type=type(exc).__name__,
+        message=str(exc),
+        traceback="".join(traceback.format_exception(exc)),
+    )
+
+
+def add_profile_timing(profile_timings: dict[str, float] | None, key: str, started: float) -> None:
+    if profile_timings is None:
+        return
+    profile_timings[key] = profile_timings.get(key, 0.0) + (time.perf_counter() - started)
 
 
 def find_opf_path(epub: zipfile.ZipFile) -> str:
@@ -283,14 +306,17 @@ def build_translation_plan(
     documents = spine_documents(source, opf_path)
     html_documents = manifest_documents(source, opf_path)
     segments_by_doc: dict[str, list[Segment]] = {}
-    skipped_documents: list[str] = []
+    skipped_documents: list[SkippedDocument] = []
     selected = 0
 
     for document in documents:
         try:
-            _, segments = bilingualize_xhtml(source.read(document.path), min_chars=min_chars)
-        except Exception:
-            skipped_documents.append(document.path)
+            result = bilingualize_xhtml(source.read(document.path), min_chars=min_chars)
+            if isinstance(result, BilingualizeResult):
+                raise ValueError("Unexpected bilingualized result while collecting segments")
+            _, segments = result
+        except (ET.ParseError, KeyError, UnicodeDecodeError, ValueError) as exc:
+            skipped_documents.append(skipped_document(document.path, "collect_segments", exc))
             continue
         if limit is not None:
             remaining = max(limit - selected, 0)
@@ -356,12 +382,16 @@ def convert_epub_to_bilingual(
     style_css: str | None = None,
     number_headings: bool = False,
     progress_callback: ProgressCallback | None = None,
+    profile_timings: dict[str, float] | None = None,
 ) -> ConversionStats:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(input_path, "r") as source:
+        started = time.perf_counter()
         plan = build_translation_plan(source, min_chars=min_chars, limit=limit)
+        add_profile_timing(profile_timings, "plan", started)
         stats = ConversionStats(documents=len(plan.documents), skipped_documents=list(plan.skipped_documents))
 
+        started = time.perf_counter()
         translations_by_doc = translate_plan_segments(
             translator,
             plan.segments_by_doc,
@@ -369,6 +399,7 @@ def convert_epub_to_bilingual(
             concurrency=concurrency,
             progress_callback=progress_callback,
         )
+        add_profile_timing(profile_timings, "llm", started)
 
         modified: dict[str, bytes] = {}
         heading_numbers: dict[str, str] | None = None
@@ -378,10 +409,11 @@ def convert_epub_to_bilingual(
                 try:
                     modified_ncx, heading_numbers = number_ncx_toc(source.read(ncx_path), ncx_path)
                     modified[ncx_path] = modified_ncx
-                except Exception:
-                    stats.skipped_documents.append(ncx_path)
+                except (ET.ParseError, KeyError, ValueError) as exc:
+                    stats.skipped_documents.append(skipped_document(ncx_path, "number_toc", exc))
 
         heading_counters = [0, 0, 0, 0]
+        started = time.perf_counter()
         for document_path, translations in translations_by_doc.items():
             if not translations:
                 continue
@@ -391,20 +423,24 @@ def convert_epub_to_bilingual(
                     translations=translations,
                     min_chars=min_chars,
                 )
-            except Exception:
-                stats.skipped_documents.append(document_path)
+            except (ET.ParseError, KeyError, UnicodeDecodeError, ValueError) as exc:
+                stats.skipped_documents.append(skipped_document(document_path, "insert_translations", exc))
                 continue
             if isinstance(result, BilingualizeResult):
                 content = result.content
                 if layout == "clean":
-                    content = restyle_bilingual_xhtml(
-                        content,
-                        style_css=style_css,
-                        number_headings=number_headings,
-                        heading_counters=heading_counters,
-                        heading_numbers=heading_numbers,
-                        document_path=document_path,
-                    )
+                    try:
+                        content = restyle_bilingual_xhtml(
+                            content,
+                            style_css=style_css,
+                            number_headings=number_headings,
+                            heading_counters=heading_counters,
+                            heading_numbers=heading_numbers,
+                            document_path=document_path,
+                        )
+                    except (ET.ParseError, ValueError) as exc:
+                        stats.skipped_documents.append(skipped_document(document_path, "restyle_translated_document", exc))
+                        continue
                 modified[document_path] = content
                 stats.translated_segments += result.segments
 
@@ -422,10 +458,13 @@ def convert_epub_to_bilingual(
                             document_path=document.path,
                         )
                     modified[document.path] = content
-                except Exception:
-                    stats.skipped_documents.append(document.path)
+                except (ET.ParseError, KeyError, UnicodeDecodeError, ValueError) as exc:
+                    stats.skipped_documents.append(skipped_document(document.path, "restyle_untranslated_document", exc))
+        add_profile_timing(profile_timings, "html_insert_restyle", started)
 
+        started = time.perf_counter()
         write_epub_copy(source, output_path, modified)
+        add_profile_timing(profile_timings, "zip_write", started)
         return stats
 
 
@@ -495,21 +534,50 @@ def translate_plan_segments(
 
     if concurrency <= 1 or total_batches <= 1:
         for document_path, batch, missing_count in batches:
-            translations_by_doc[document_path].update(translate_batch_to_dict(translator, batch))
+            if missing_count == 0:
+                translations_by_doc[document_path].update(translate_cached_batch_to_dict(translator, batch))
+            else:
+                translations_by_doc[document_path].update(translate_batch_to_dict(translator, batch))
             mark_done(document_path, missing_count)
         return translations_by_doc
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {
-            executor.submit(translate_batch_to_dict, translator, batch): (document_path, missing_count)
-            for document_path, batch, missing_count in batches
-        }
-        for future in as_completed(futures):
-            document_path, translated_count = futures[future]
-            translations_by_doc[document_path].update(future.result())
-            mark_done(document_path, translated_count)
+        batch_iter = iter(batches)
+        futures: dict[Future[dict[str, str]], tuple[str, int]] = {}
+
+        def submit_next() -> bool:
+            for document_path, batch, missing_count in batch_iter:
+                if missing_count == 0:
+                    translations_by_doc[document_path].update(translate_cached_batch_to_dict(translator, batch))
+                    mark_done(document_path, missing_count)
+                    continue
+                futures[executor.submit(translate_batch_to_dict, translator, batch)] = (document_path, missing_count)
+                return True
+            return False
+
+        for _ in range(min(concurrency, total_batches)):
+            if not submit_next():
+                break
+
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                document_path, translated_count = futures.pop(future)
+                translations_by_doc[document_path].update(future.result())
+                mark_done(document_path, translated_count)
+                submit_next()
 
     return translations_by_doc
+
+
+def translate_cached_batch_to_dict(translator: Translator, batch: list[Segment]) -> dict[str, str]:
+    cached_batch = getattr(translator, "cached_batch", None)
+    if cached_batch is None:
+        return translate_batch_to_dict(translator, batch)
+    values = cached_batch([segment.text for segment in batch])
+    if len(values) != len(batch) or any(value is None for value in values):
+        return translate_batch_to_dict(translator, batch)
+    return {segment.id: value for segment, value in zip(batch, values, strict=True) if value is not None}
 
 
 def translate_batch_to_dict(translator: Translator, batch: list[Segment]) -> dict[str, str]:

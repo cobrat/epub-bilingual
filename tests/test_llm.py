@@ -6,8 +6,10 @@ import tempfile
 from unittest.mock import patch
 
 from ebook_bilingual.llm import (
+    CachedTranslator,
     fetch_ollama_models,
     OpenAICompatibleTranslator,
+    TranslationCache,
     format_terminology,
     is_ollama_base_url,
     load_terminology,
@@ -39,6 +41,11 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self.data
+
+
+class PrefixTranslator:
+    def translate_batch(self, texts: list[str]) -> list[str]:
+        return [f"译文：{text}" for text in texts]
 
 
 class LlmTests(unittest.TestCase):
@@ -77,6 +84,51 @@ class LlmTests(unittest.TestCase):
 
         self.assertEqual(translator.translate_batch(["source"]), ["译文"])
 
+    def test_chat_completions_url_preserves_query_params(self) -> None:
+        translator = OpenAICompatibleTranslator(
+            api_key="test-key",
+            model="deployment-name",
+            base_url="https://example.openai.azure.com/openai/deployments/deployment-name?api-version=2024-10-21",
+        )
+
+        self.assertEqual(
+            translator.chat_completions_url,
+            "https://example.openai.azure.com/openai/deployments/deployment-name/chat/completions?api-version=2024-10-21",
+        )
+
+    def test_full_chat_completions_url_is_not_appended(self) -> None:
+        translator = OpenAICompatibleTranslator(
+            api_key="test-key",
+            model="deployment-name",
+            base_url="https://example.openai.azure.com/openai/deployments/deployment-name/chat/completions?api-version=2024-10-21",
+        )
+
+        self.assertEqual(
+            translator.chat_completions_url,
+            "https://example.openai.azure.com/openai/deployments/deployment-name/chat/completions?api-version=2024-10-21",
+        )
+
+    def test_kimi_k2_payload_omits_temperature_and_disables_thinking(self) -> None:
+        translator = OpenAICompatibleTranslator(
+            api_key="test-key",
+            model="kimi-k2.6",
+            base_url="https://api.moonshot.cn/v1",
+        )
+
+        payload = translator._translation_payload(["hello"])
+
+        self.assertNotIn("temperature", payload)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
+
+    def test_standard_payload_keeps_temperature(self) -> None:
+        translator = OpenAICompatibleTranslator(
+            api_key="test-key",
+            model="gpt-4.1-mini",
+            base_url="https://api.openai.com/v1",
+        )
+
+        self.assertEqual(translator._translation_payload(["hello"])["temperature"], 0.2)
+
     def test_fetch_ollama_models_reads_local_tags(self) -> None:
         def fake_urlopen(req: object, timeout: float) -> FakeResponse:
             self.assertEqual(req.full_url, "http://localhost:11434/api/tags")
@@ -85,6 +137,19 @@ class LlmTests(unittest.TestCase):
 
         with patch("ebook_bilingual.llm.request.urlopen", fake_urlopen):
             self.assertEqual(fetch_ollama_models("http://localhost:11434/v1"), ["llama3.1:8b", "qwen2.5:7b"])
+
+    def test_cached_translator_can_delay_cache_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "cache.json"
+            cache = TranslationCache.load(cache_path)
+            translator = CachedTranslator(PrefixTranslator(), cache, "model", "English", "Chinese", autosave=False)
+
+            self.assertEqual(translator.translate_batch(["Hello."]), ["译文：Hello."])
+            self.assertFalse(cache_path.exists())
+
+            cache.save()
+            self.assertTrue(cache_path.exists())
+            self.assertIn("译文：Hello.", cache_path.read_text(encoding="utf-8"))
 
     def test_is_ollama_base_url_matches_default_port(self) -> None:
         self.assertTrue(is_ollama_base_url("http://localhost:11434/v1"))

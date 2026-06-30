@@ -4,9 +4,21 @@ version = "0.1.0"
 description = "Convert EPUB books into bilingual side-by-side EPUBs with an OpenAI-compatible LLM."
 readme = "README.md"
 requires-python = ">=3.10"
+authors = [
+    { name = "Zihan Wu" },
+]
+license = "MIT"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Text Processing",
+    "Topic :: Utilities",
+]
 dependencies = [
     "questionary>=2,<3",
-    "rich>=15,<16",
 ]
 
 [project.scripts]
@@ -18,3 +30,22 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "ebook_bilingual"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13,<2",
+    "ruff>=0.8,<1",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src/ebook_bilingual"]
+ignore_missing_imports = true
+warn_unused_configs = true
