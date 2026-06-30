@@ -412,7 +412,7 @@ def convert_epub_to_bilingual(
                 except (ET.ParseError, KeyError, ValueError) as exc:
                     stats.skipped_documents.append(skipped_document(ncx_path, "number_toc", exc))
 
-        heading_counters = [0, 0, 0, 0]
+        heading_counters = [0, 0, 0, 0, 0, 0]
         started = time.perf_counter()
         for document_path, translations in translations_by_doc.items():
             if not translations:

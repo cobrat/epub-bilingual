@@ -308,7 +308,8 @@ class ConverterTests(unittest.TestCase):
             with zipfile.ZipFile(output_path, "r") as zf:
                 chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
                 self.assertIn("bilingual-heading-number", chapter)
-                self.assertIn(">1 </span>Chapter One", chapter)
+                self.assertIn('class="bilingual-heading-marker bilingual-heading-marker-level-1">■</span>', chapter)
+                self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-1">1</span> Chapter One', chapter)
 
     def test_medium_generated_epub_records_profile_timings(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

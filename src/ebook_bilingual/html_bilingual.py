@@ -28,8 +28,9 @@ BLOCK_TAGS = {
     "dd",
 }
 
-NUMBERED_HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3}
-LEADING_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)(?:[.)])?\s+")
+NUMBERED_HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
+HEADING_MARKERS = {1: "■", 2: "◆", 3: "▸", 4: "•", 5: "–", 6: "·"}
+LEADING_NUMBER_RE = re.compile(r"^\s*(?:[■◆▸•–·]\s*)?(\d+(?:\.\d+)*)(?:[.)])?\s+")
 CHAPTER_NUMBER_RE = re.compile(r"^\s*Chapter\s+(\d+)\b", re.IGNORECASE)
 SKIP_HEADING_NUMBER_DOCUMENT_PARTS = {
     "afterword",
@@ -45,6 +46,8 @@ SKIP_HEADING_NUMBER_DOCUMENT_PARTS = {
     "toc",
 }
 SKIP_ANCESTORS = {"script", "style", "nav", "code", "pre", "svg", "math"}
+SKIP_HEADING_NUMBER_ANCESTOR_TAGS = {"figure"}
+SKIP_HEADING_NUMBER_ANCESTOR_DATA_TYPES = {"note", "tip"}
 PROTECTED_INLINE_TAGS = {"code", "kbd", "samp", "var", "math"}
 INLINE_PLACEHOLDER_RE = re.compile(r"__EBOOK_BILINGUAL_KEEP_\d+__")
 GENERIC_INLINE_PLACEHOLDER = "__EBOOK_BILINGUAL_KEEP_N__"
@@ -398,11 +401,7 @@ def restyle_bilingual_xhtml(
         element.attrib.pop("style", None)
         classes = element.attrib.get("class")
         if classes is not None:
-            kept_classes = [
-                class_name
-                for class_name in classes.split()
-                if class_name in {"bilingual-original", "bilingual-translation", "bilingual-heading-number"}
-            ]
+            kept_classes = [class_name for class_name in classes.split() if should_keep_clean_class(class_name)]
             if kept_classes:
                 element.set("class", " ".join(kept_classes))
             else:
@@ -415,7 +414,7 @@ def restyle_bilingual_xhtml(
     if number_headings and should_number_document_headings(document_path):
         number_document_headings(
             root,
-            heading_counters if heading_counters is not None else [0, 0, 0],
+            heading_counters if heading_counters is not None else [0, 0, 0, 0, 0, 0],
             document_path=document_path,
             heading_numbers=heading_numbers,
         )
@@ -433,6 +432,10 @@ def should_number_document_headings(document_path: str | None) -> bool:
     return not any(part in stem for part in SKIP_HEADING_NUMBER_DOCUMENT_PARTS)
 
 
+def should_keep_clean_class(class_name: str) -> bool:
+    return class_name in {"bilingual-original", "bilingual-translation"} or class_name.startswith("bilingual-heading")
+
+
 def number_document_headings(
     root: ET.Element,
     counters: list[int],
@@ -446,15 +449,17 @@ def number_document_headings(
         level = NUMBERED_HEADING_TAGS.get(local_name(element.tag))
         if level is None:
             continue
-        if should_skip_element(element) or has_skipped_ancestor(element, parents):
+        if should_skip_element(element) or has_skipped_ancestor(element, parents) or has_heading_number_skip_ancestor(element, parents):
             continue
 
         text = element_text(element)
         if heading_numbers is not None:
             number = heading_number_for_element(element, parents, document_path, heading_numbers)
-            if number is not None and parse_heading_number(text, level) is None:
-                insert_heading_number(element, number)
-            continue
+            if number is not None:
+                if parse_heading_number(text, level) is None:
+                    insert_heading_number(element, number, level)
+                sync_heading_counters(counters, number)
+                continue
 
         if level == 1 and CHAPTER_NUMBER_RE.match(text):
             existing_number = parse_heading_number(text, level)
@@ -470,7 +475,18 @@ def number_document_headings(
             continue
 
         generated = next_heading_number(counters, effective_level)
-        insert_heading_number(element, generated)
+        insert_heading_number(element, generated, level)
+
+
+def has_heading_number_skip_ancestor(element: ET.Element, parents: dict[ET.Element, ET.Element]) -> bool:
+    current = parents.get(element)
+    while current is not None:
+        if local_name(current.tag) in SKIP_HEADING_NUMBER_ANCESTOR_TAGS:
+            return True
+        if current.attrib.get("data-type") in SKIP_HEADING_NUMBER_ANCESTOR_DATA_TYPES:
+            return True
+        current = parents.get(current)
+    return False
 
 
 def heading_number_for_element(
@@ -522,12 +538,26 @@ def next_heading_number(counters: list[int], level: int) -> str:
     return ".".join(str(value) for value in counters[:level])
 
 
-def insert_heading_number(element: ET.Element, number: str) -> None:
+def insert_heading_number(element: ET.Element, number: str, level: int) -> None:
     ns = namespace_for(element.tag)
-    marker = ET.Element(qname(ns, "span"), {"class": "bilingual-heading-number"})
-    marker.text = f"{number} "
-    marker.tail = element.text
+    add_class(element, "bilingual-heading")
+    add_class(element, f"bilingual-heading-level-{level}")
+
+    marker = ET.Element(
+        qname(ns, "span"),
+        {"class": f"bilingual-heading-marker bilingual-heading-marker-level-{level}"},
+    )
+    marker.text = HEADING_MARKERS.get(level, "•")
+    marker.tail = " "
+
+    number_marker = ET.Element(
+        qname(ns, "span"),
+        {"class": f"bilingual-heading-number bilingual-heading-number-level-{level}"},
+    )
+    number_marker.text = number
+    number_marker.tail = " " + (element.text or "")
     element.text = None
+    element.insert(0, number_marker)
     element.insert(0, marker)
 
 

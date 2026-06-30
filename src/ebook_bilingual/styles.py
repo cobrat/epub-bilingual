@@ -92,9 +92,30 @@ h6.bilingual-original + .bilingual-translation {
   margin-bottom: 1.25em;
 }
 
+.bilingual-heading-marker,
 .bilingual-heading-number {
+  font-family: sans-serif;
   font-weight: 700;
-  margin-right: 0.15em;
+}
+
+.bilingual-heading-marker {
+  margin-right: 0.18em;
+}
+
+.bilingual-heading-number {
+  margin-right: 0.22em;
+}
+
+.bilingual-heading-marker-level-1,
+.bilingual-heading-number-level-1 {
+  font-size: 0.95em;
+}
+
+.bilingual-heading-marker-level-5,
+.bilingual-heading-marker-level-6,
+.bilingual-heading-number-level-5,
+.bilingual-heading-number-level-6 {
+  color: #333;
 }
 
 img,
@@ -209,33 +230,75 @@ hr {
   margin: 1.2em 0;
 }
 
-h1.bilingual-original {
+h1.bilingual-original,
+h1.bilingual-heading-level-1 {
+  border-bottom: 1px solid #777;
+  border-top: 0.16em solid #111;
   break-after: avoid;
   font-size: 1.35em;
   font-weight: 700;
   line-height: 1.25;
-  margin: 1.1em 0 0.4em 0;
+  margin: 1.45em 0 0.55em 0;
   page-break-after: avoid;
+  padding: 0.42em 0 0.3em 0;
 }
 
-h2.bilingual-original {
+h2.bilingual-original,
+h2.bilingual-heading-level-2 {
+  border-left: 0.28em solid #111;
   break-after: avoid;
   font-size: 1.18em;
   font-weight: 700;
   line-height: 1.3;
-  margin: 1em 0 0.35em 0;
+  margin: 1.2em 0 0.42em 0;
   page-break-after: avoid;
+  padding-left: 0.45em;
 }
 
 h3.bilingual-original,
-h4.bilingual-original,
-h5.bilingual-original,
-h6.bilingual-original {
+h3.bilingual-heading-level-3 {
   break-after: avoid;
-  font-size: 1.06em;
+  font-size: 1.08em;
+  font-weight: 700;
+  line-height: 1.34;
+  margin: 1.05em 0 0.32em 0;
+  page-break-after: avoid;
+}
+
+h4.bilingual-original,
+h4.bilingual-heading-level-4 {
+  border-left: 0.16em solid #777;
+  break-after: avoid;
+  font-size: 1em;
   font-weight: 700;
   line-height: 1.35;
-  margin: 0.9em 0 0.3em 0;
+  margin: 0.95em 0 0.28em 0;
+  page-break-after: avoid;
+  padding-left: 0.35em;
+}
+
+h5.bilingual-original,
+h5.bilingual-heading-level-5 {
+  border-bottom: 1px dotted #999;
+  break-after: avoid;
+  font-family: sans-serif;
+  font-size: 0.96em;
+  font-weight: 700;
+  line-height: 1.32;
+  margin: 0.85em 0 0.25em 0;
+  page-break-after: avoid;
+  padding-bottom: 0.12em;
+}
+
+h6.bilingual-original,
+h6.bilingual-heading-level-6 {
+  break-after: avoid;
+  color: #333;
+  font-family: sans-serif;
+  font-size: 0.92em;
+  font-weight: 700;
+  line-height: 1.28;
+  margin: 0.75em 0 0.2em 0;
   page-break-after: avoid;
 }
 

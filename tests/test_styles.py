@@ -39,6 +39,15 @@ class StylesTests(unittest.TestCase):
         self.assertIn("caption {", css)
         self.assertIn("font-size: 1.2em;", css)
 
+    def test_eink_style_distinguishes_heading_levels(self) -> None:
+        path = Path(__file__).parents[1] / "styles" / "eink-10.3.css"
+        css = path.read_text(encoding="utf-8")
+
+        self.assertIn(".bilingual-heading-marker-level-1", css)
+        self.assertIn("h4.bilingual-heading-level-4", css)
+        self.assertIn("h5.bilingual-heading-level-5", css)
+        self.assertIn("h6.bilingual-heading-level-6", css)
+
 
 if __name__ == "__main__":
     unittest.main()

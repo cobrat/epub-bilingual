@@ -173,15 +173,44 @@ class HtmlBilingualTests(unittest.TestCase):
     <h1>Chapter 1</h1>
     <h1>Overview</h1>
     <h2>Details</h2>
+    <h3>Implementation</h3>
+    <h4>Step</h4>
+    <h5>Substep</h5>
+    <h6>Fine point</h6>
     <h1>Second Topic</h1>
   </body>
 </html>"""
 
         output = restyle_bilingual_xhtml(content, number_headings=True).decode("utf-8")
 
-        self.assertIn('class="bilingual-heading-number">1.1 </span>Overview', output)
-        self.assertIn('class="bilingual-heading-number">1.1.1 </span>Details', output)
-        self.assertIn('class="bilingual-heading-number">1.2 </span>Second Topic', output)
+        self.assertIn('class="bilingual-heading bilingual-heading-level-1"', output)
+        self.assertIn('class="bilingual-heading-marker bilingual-heading-marker-level-1">■</span>', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-1">1.1</span> Overview', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-2">1.1.1</span> Details', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-3">1.1.1.1</span> Implementation', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-4">1.1.1.1.1</span> Step', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-5">1.1.1.1.1.1</span> Substep', output)
+        self.assertIn('class="bilingual-heading-marker bilingual-heading-marker-level-6">·</span>', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-6">1.1.1.1.1.2</span> Fine point', output)
+        self.assertIn('class="bilingual-heading-number bilingual-heading-number-level-1">1.2</span> Second Topic', output)
+
+    def test_restyle_does_not_number_figure_headings(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <h1>Chapter 1</h1>
+    <h2>Topic</h2>
+    <figure>
+      <h6>Figure 1. Architecture overview</h6>
+    </figure>
+  </body>
+</html>"""
+
+        output = restyle_bilingual_xhtml(content, number_headings=True).decode("utf-8")
+
+        self.assertIn("<h6>Figure 1. Architecture overview</h6>", output)
+        self.assertNotIn('<h6 class="bilingual-heading', output)
 
     def test_restyle_skips_front_matter_heading_numbers(self) -> None:
         content = b"""<?xml version="1.0" encoding="UTF-8"?>
