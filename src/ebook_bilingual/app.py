@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from argparse import Namespace
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import time
+from typing import Any
 
 from .epub import (
     ConversionStats,
@@ -16,6 +18,7 @@ from .llm import (
     CachedTranslator,
     MockTranslator,
     is_ollama_base_url,
+    is_probably_untranslated,
     OpenAICompatibleTranslator,
     TranslationCache,
     Translator,
@@ -25,6 +28,7 @@ from .llm import (
 )
 from .paths import copy_into_work_dir, discover_style_css, prepare_run_paths
 from .pricing import resolve_prices
+from .profiling import ProfileMetrics
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,7 @@ class ConversionOptions:
     fail_on_skipped: bool = False
     verbose: bool = False
     profile: bool = False
+    profile_json: Path | None = None
     cwd: Path = field(default_factory=Path.cwd)
 
 
@@ -82,6 +87,7 @@ class DryRunResult:
     output_price: float | None
     price_currency: str
     profile_timings: dict[str, float] = field(default_factory=dict)
+    profile_metrics: ProfileMetrics = field(default_factory=ProfileMetrics)
 
     @property
     def exit_code(self) -> int:
@@ -94,6 +100,7 @@ class ConversionRunResult:
     cache_path: Path
     stats: ConversionStats
     profile_timings: dict[str, float] = field(default_factory=dict)
+    profile_metrics: ProfileMetrics = field(default_factory=ProfileMetrics)
 
     @property
     def exit_code(self) -> int:
@@ -135,14 +142,17 @@ def options_from_namespace(args: Namespace, *, cwd: Path | None = None) -> Conve
         fail_on_skipped=args.fail_on_skipped,
         verbose=args.verbose,
         profile=args.profile,
+        profile_json=args.profile_json,
         cwd=cwd or Path.cwd(),
     )
 
 
 def run_dry_run(options: ConversionOptions) -> DryRunResult:
+    total_started = time.perf_counter()
     validate_options(options)
     profile_timings: dict[str, float] = {}
-    prepared = prepare_conversion(options, need_translator=False)
+    profile_metrics = ProfileMetrics()
+    prepared = prepare_conversion(options, need_translator=False, profile_metrics=profile_metrics)
 
     started = time.perf_counter()
     stats = analyze_epub(
@@ -151,20 +161,22 @@ def run_dry_run(options: ConversionOptions) -> DryRunResult:
         min_chars=options.min_chars,
         limit=options.limit,
         output_token_ratio=options.output_token_ratio,
-        is_cached=lambda text: prepared.cache.get(
-            cache_key(prepared.model_name, options.source_lang, options.target_lang, text, prepared.cache_namespace)
-        )
-        is not None,
+        is_cached=lambda text: is_usable_cached_translation(prepared, options, text),
     )
     add_timing(profile_timings, "plan", started)
+    profile_metrics.record_cache_result(stats.cached_segments, stats.uncached_segments)
+    add_timing(profile_timings, "total", total_started)
 
-    return DryRunResult(
+    result = DryRunResult(
         stats=stats,
         input_price=prepared.input_price,
         output_price=prepared.output_price,
         price_currency=options.price_currency,
         profile_timings=profile_timings,
+        profile_metrics=profile_metrics,
     )
+    write_profile_json_if_requested(options, dry_run_profile_payload(result))
+    return result
 
 
 def run_conversion(
@@ -172,9 +184,11 @@ def run_conversion(
     *,
     progress_callback: ProgressCallback | None = None,
 ) -> ConversionRunResult:
+    total_started = time.perf_counter()
     validate_options(options)
     profile_timings: dict[str, float] = {}
-    prepared = prepare_conversion(options, need_translator=True)
+    profile_metrics = ProfileMetrics()
+    prepared = prepare_conversion(options, need_translator=True, profile_metrics=profile_metrics)
     assert prepared.raw_translator is not None
 
     translator = CachedTranslator(
@@ -185,6 +199,7 @@ def run_conversion(
         target_language=options.target_lang,
         cache_namespace=prepared.cache_namespace,
         autosave=False,
+        profile_metrics=profile_metrics,
     )
 
     stats: ConversionStats | None = None
@@ -202,6 +217,7 @@ def run_conversion(
             number_headings=options.number_headings,
             progress_callback=progress_callback,
             profile_timings=profile_timings,
+            profile_metrics=profile_metrics,
         )
     finally:
         started = time.perf_counter()
@@ -209,12 +225,16 @@ def run_conversion(
         add_timing(profile_timings, "cache_save", started)
 
     assert stats is not None
-    return ConversionRunResult(
+    add_timing(profile_timings, "total", total_started)
+    result = ConversionRunResult(
         output_path=prepared.output_path,
         cache_path=prepared.cache_path,
         stats=stats,
         profile_timings=profile_timings,
+        profile_metrics=profile_metrics,
     )
+    write_profile_json_if_requested(options, conversion_profile_payload(result))
+    return result
 
 
 def validate_options(options: ConversionOptions) -> None:
@@ -258,7 +278,12 @@ def validate_options(options: ConversionOptions) -> None:
             raise ConversionConfigError("--api-key is required unless LLM_API_KEY or OPENAI_API_KEY is set")
 
 
-def prepare_conversion(options: ConversionOptions, *, need_translator: bool) -> PreparedConversion:
+def prepare_conversion(
+    options: ConversionOptions,
+    *,
+    need_translator: bool,
+    profile_metrics: ProfileMetrics | None = None,
+) -> PreparedConversion:
     input_arg = require_path(options.input_path)
     input_path = resolve_path(input_arg, options.cwd)
     output_path = resolve_path(options.output_path, options.cwd) if options.output_path is not None else None
@@ -300,6 +325,7 @@ def prepare_conversion(options: ConversionOptions, *, need_translator: bool) -> 
                 timeout=options.timeout,
                 retries=options.retries,
                 terminology=terminology,
+                profile_metrics=profile_metrics,
             )
 
     cache = TranslationCache.load(run_cache_path)
@@ -348,3 +374,79 @@ def require_model(model: str | None) -> str:
 
 def add_timing(profile_timings: dict[str, float], key: str, started: float) -> None:
     profile_timings[key] = profile_timings.get(key, 0.0) + (time.perf_counter() - started)
+
+
+def is_usable_cached_translation(prepared: PreparedConversion, options: ConversionOptions, text: str) -> bool:
+    cached = prepared.cache.get(cache_key(prepared.model_name, options.source_lang, options.target_lang, text, prepared.cache_namespace))
+    return cached is not None and not is_probably_untranslated(text, cached, options.target_lang)
+
+
+def write_profile_json_if_requested(options: ConversionOptions, payload: dict[str, Any]) -> None:
+    if options.profile_json is None:
+        return
+    path = resolve_path(options.profile_json, options.cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
+def dry_run_profile_payload(result: DryRunResult) -> dict[str, Any]:
+    stats = result.stats
+    return {
+        "schema_version": 1,
+        "mode": "dry_run",
+        "total_seconds": rounded_seconds(result.profile_timings.get("total", 0.0)),
+        "stages": rounded_timings(result.profile_timings),
+        "documents": stats.documents,
+        "html_documents": stats.html_documents,
+        "segments": stats.segments,
+        "translated_segments": 0,
+        "characters": stats.characters,
+        "batches": stats.batches,
+        "planned_batches": stats.batches,
+        "cache": {
+            "hits": stats.cached_segments,
+            "misses": stats.uncached_segments,
+        },
+        "llm": {
+            "batches": 0,
+            "requested_segments": 0,
+            "raw_requests": 0,
+            "fallbacks": 0,
+            "retries": 0,
+        },
+        "output_size": 0,
+        "skipped_documents": len(stats.skipped_documents),
+    }
+
+
+def conversion_profile_payload(result: ConversionRunResult) -> dict[str, Any]:
+    stats = result.stats
+    metrics = result.profile_metrics.to_dict()
+    output_size = result.output_path.stat().st_size if result.output_path.exists() else 0
+    return {
+        "schema_version": 1,
+        "mode": "conversion",
+        "total_seconds": rounded_seconds(result.profile_timings.get("total", 0.0)),
+        "stages": rounded_timings(result.profile_timings),
+        "documents": stats.documents,
+        "html_documents": stats.html_documents,
+        "segments": stats.total_segments,
+        "translated_segments": stats.translated_segments,
+        "characters": stats.characters,
+        "batches": stats.batches,
+        "planned_batches": stats.batches,
+        "cache": metrics["cache"],
+        "llm": metrics["llm"],
+        "output_size": output_size,
+        "skipped_documents": len(stats.skipped_documents),
+    }
+
+
+def rounded_timings(profile_timings: dict[str, float]) -> dict[str, float]:
+    return {key: rounded_seconds(value) for key, value in sorted(profile_timings.items()) if key != "total"}
+
+
+def rounded_seconds(value: float) -> float:
+    return round(value, 6)

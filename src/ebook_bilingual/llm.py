@@ -12,9 +12,70 @@ from typing import Protocol
 from urllib import error, request
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
+from .profiling import ProfileMetrics
+
 
 TRANSLATION_PROMPT_VERSION = "2026-04-27-v3"
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434/v1"
+INLINE_PLACEHOLDER_RE = re.compile(r"__EBOOK_BILINGUAL_KEEP_\d+__")
+URL_RE = re.compile(r"https?://\S+|www\.\S+")
+LATIN_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+-]*")
+TRANSLATABLE_ENGLISH_HINTS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "best",
+    "between",
+    "build",
+    "can",
+    "causes",
+    "continued",
+    "costs",
+    "data",
+    "default",
+    "detect",
+    "do",
+    "does",
+    "faster",
+    "feedback",
+    "first",
+    "for",
+    "from",
+    "how",
+    "in",
+    "increased",
+    "is",
+    "latency",
+    "make",
+    "mitigate",
+    "model",
+    "not",
+    "of",
+    "on",
+    "or",
+    "practices",
+    "query",
+    "rank",
+    "respond",
+    "response",
+    "return",
+    "see",
+    "such",
+    "the",
+    "this",
+    "time",
+    "to",
+    "token",
+    "use",
+    "what",
+    "when",
+    "why",
+    "with",
+    "work",
+    "your",
+}
 
 
 def is_ollama_base_url(base_url: str) -> bool:
@@ -126,6 +187,61 @@ def cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def target_prefers_cjk(target_language: str) -> bool:
+    normalized = target_language.lower()
+    return any(marker in normalized for marker in ("chinese", "simplified", "traditional", "mandarin", "中文", "汉语", "漢語"))
+
+
+def has_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def translation_quality_text(text: str) -> str:
+    text = INLINE_PLACEHOLDER_RE.sub(" ", text)
+    text = URL_RE.sub(" ", text)
+    return normalize_quality_text(text)
+
+
+def normalize_quality_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def latin_words(text: str) -> list[str]:
+    return LATIN_WORD_RE.findall(translation_quality_text(text))
+
+
+def looks_like_identifier_or_reference(text: str) -> bool:
+    words = latin_words(text)
+    if not words:
+        return True
+    lowered = [word.lower() for word in words]
+    if any(word in TRANSLATABLE_ENGLISH_HINTS for word in lowered):
+        return False
+    return len(words) <= 8
+
+
+def is_probably_untranslated(source: str, translation: str, target_language: str) -> bool:
+    if not target_prefers_cjk(target_language):
+        return False
+    source_text = translation_quality_text(source)
+    translated_text = translation_quality_text(translation)
+    if not translated_text:
+        return not looks_like_identifier_or_reference(source)
+    if has_cjk(translated_text):
+        return False
+    source_words = latin_words(source_text)
+    translated_words = latin_words(translated_text)
+    if not translated_words:
+        return False
+    if looks_like_identifier_or_reference(source_text) and len(translated_words) < 10:
+        return False
+    if normalize_quality_text(source_text) == normalize_quality_text(translated_text) and len(source_words) >= 2:
+        return True
+    if len(source_words) >= 4 and len(translated_words) >= 4:
+        return True
+    return len(translated_words) >= 8
+
+
 class CachedTranslator:
     def __init__(
         self,
@@ -136,6 +252,7 @@ class CachedTranslator:
         target_language: str,
         cache_namespace: str = "",
         autosave: bool = True,
+        profile_metrics: ProfileMetrics | None = None,
     ) -> None:
         self.translator = translator
         self.cache = cache
@@ -144,6 +261,7 @@ class CachedTranslator:
         self.target_language = target_language
         self.cache_namespace = cache_namespace
         self.autosave = autosave
+        self.profile_metrics = profile_metrics
         self._inflight_lock = threading.RLock()
         self._inflight: dict[str, threading.Event] = {}
 
@@ -156,6 +274,8 @@ class CachedTranslator:
         for index, text in enumerate(texts):
             key = self.cache_key_for_text(text)
             cached = self.cache.get(key)
+            if cached is not None and is_probably_untranslated(text, cached, self.target_language):
+                cached = None
             results.append(cached)
             if cached is not None:
                 continue
@@ -165,6 +285,8 @@ class CachedTranslator:
 
             with self._inflight_lock:
                 cached = self.cache.get(key)
+                if cached is not None and is_probably_untranslated(text, cached, self.target_language):
+                    cached = None
                 if cached is not None:
                     results[index] = cached
                     continue
@@ -182,8 +304,9 @@ class CachedTranslator:
         try:
             if owned_texts:
                 translated = self.translator.translate_batch(owned_texts)
-                for key, value in zip(owned_keys, translated, strict=True):
-                    self.cache.set(key, value)
+                for key, text, value in zip(owned_keys, owned_texts, translated, strict=True):
+                    if not is_probably_untranslated(text, value, self.target_language):
+                        self.cache.set(key, value)
                     for index in owned_indexes[key]:
                         results[index] = value
                 if self.autosave:
@@ -210,12 +333,19 @@ class CachedTranslator:
         count = 0
         for text in texts:
             key = self.cache_key_for_text(text)
-            if self.cache.get(key) is not None:
+            cached = self.cache.get(key)
+            if cached is not None and not is_probably_untranslated(text, cached, self.target_language):
                 count += 1
         return count
 
     def cached_batch(self, texts: list[str]) -> list[str | None]:
-        return [self.cache.get(self.cache_key_for_text(text)) for text in texts]
+        values: list[str | None] = []
+        for text in texts:
+            cached = self.cache.get(self.cache_key_for_text(text))
+            if cached is not None and is_probably_untranslated(text, cached, self.target_language):
+                cached = None
+            values.append(cached)
+        return values
 
     def cache_key_for_text(self, text: str) -> str:
         return cache_key(self.model, self.source_language, self.target_language, text, self.cache_namespace)
@@ -238,6 +368,7 @@ class OpenAICompatibleTranslator:
         timeout: int = 120,
         retries: int = 3,
         terminology: list[TerminologyEntry] | None = None,
+        profile_metrics: ProfileMetrics | None = None,
     ) -> None:
         self.api_key = api_key or ""
         self.model = model
@@ -247,6 +378,7 @@ class OpenAICompatibleTranslator:
         self.timeout = timeout
         self.retries = retries
         self.terminology = terminology or []
+        self.profile_metrics = profile_metrics
 
     @property
     def chat_completions_url(self) -> str:
@@ -268,10 +400,15 @@ class OpenAICompatibleTranslator:
         except (ValueError, json.JSONDecodeError):
             if len(texts) == 1:
                 translation = parse_single_translation_response(content)
-                if translation is not None:
+                if translation is not None and not is_probably_untranslated(texts[0], translation, self.target_language):
                     return [translation]
+            self._record_fallback()
             return self._translate_one_by_one(texts)
         if len(translations) != len(texts):
+            self._record_fallback()
+            return self._translate_one_by_one(texts)
+        if any(is_probably_untranslated(source, translation, self.target_language) for source, translation in zip(texts, translations, strict=True)):
+            self._record_fallback()
             return self._translate_one_by_one(texts)
         return translations
 
@@ -317,14 +454,15 @@ class OpenAICompatibleTranslator:
         for _ in range(max(self.retries, 1)):
             content = self._post_json(payload)
             translation = parse_single_translation_response(content)
-            if translation is not None:
+            if translation is not None and not is_probably_untranslated(text, translation, self.target_language):
                 return translation
 
         plain_payload = self._single_text_translation_payload(text)
+        self._record_fallback()
         for _ in range(max(self.retries, 1)):
             content = self._post_json(plain_payload)
             translation = parse_single_translation_response(content) or clean_plain_translation(content)
-            if translation:
+            if translation and not is_probably_untranslated(text, translation, self.target_language):
                 return translation
         return text
 
@@ -374,6 +512,7 @@ class OpenAICompatibleTranslator:
         for attempt in range(1, self.retries + 1):
             req = request.Request(self.chat_completions_url, data=body, headers=headers, method="POST")
             try:
+                self._record_raw_llm_request()
                 with request.urlopen(req, timeout=self.timeout) as resp:
                     response_data = json.loads(resp.read().decode("utf-8"))
                 return response_data["choices"][0]["message"]["content"]
@@ -381,9 +520,22 @@ class OpenAICompatibleTranslator:
                 last_error = exc
                 if attempt >= self.retries:
                     break
+                self._record_retry()
                 time.sleep(min(2**attempt, 10))
 
         raise RuntimeError(f"LLM request failed after {self.retries} attempts: {last_error}") from last_error
+
+    def _record_raw_llm_request(self) -> None:
+        if self.profile_metrics is not None:
+            self.profile_metrics.record_raw_llm_request()
+
+    def _record_fallback(self) -> None:
+        if self.profile_metrics is not None:
+            self.profile_metrics.record_fallback()
+
+    def _record_retry(self) -> None:
+        if self.profile_metrics is not None:
+            self.profile_metrics.record_retry()
 
 
 def parse_json_string_array(content: str) -> list[str]:

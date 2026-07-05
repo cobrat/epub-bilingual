@@ -165,6 +165,88 @@ class HtmlBilingualTests(unittest.TestCase):
         self.assertIn("搜索库。", output)
         self.assertNotIn("__EBOOK_BILINGUAL_KEEP_9__", output)
 
+    def test_bilingualize_batch_insert_preserves_mixed_html_structures(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <p>Call <code>foo_bar()</code> before retrying.</p>
+    <p>Formula <math><mi>x</mi></math> stays inline.</p>
+    <figcaption>Figure caption.</figcaption>
+    <dl><dt>Term</dt><dd>Definition text.</dd></dl>
+    <table><tr><td>Table cell stays untouched.</td></tr></table>
+    <pre><code>do_not_translate()</code></pre>
+  </body>
+</html>"""
+
+        _, segments = bilingualize_xhtml(content)
+        result = bilingualize_xhtml(content, {segment.id: f"译文：{segment.text}" for segment in segments})
+        output = result.content.decode("utf-8")
+
+        self.assertIn("<code>foo_bar()</code>", output)
+        self.assertIn("<math>", output)
+        self.assertIn("译文：Figure caption.", output)
+        self.assertIn("译文：Term", output)
+        self.assertIn("译文：Definition text.", output)
+        self.assertIn("Table cell stays untouched.", output)
+        self.assertIn("译文：Table cell stays untouched.", output)
+        self.assertIn("<pre>", output)
+        self.assertIn("do_not_translate()", output)
+        self.assertNotIn("__EBOOK_BILINGUAL_KEEP_0__", output)
+        self.assertEqual(output.count('class="bilingual-translation"'), len(segments))
+
+    def test_bilingualize_translates_table_cells_and_list_items_inside_their_container(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <table>
+      <caption><span>Table 2-6.</span> Examples from <a href="https://example.com">InstructGPT</a>.</caption>
+      <tr><th>Input (context)</th><td><span>Interpreters and translators</span></td></tr>
+    </table>
+    <ul><li><a href="https://example.com">InstructGPT</a></li></ul>
+  </body>
+</html>"""
+
+        _, segments = bilingualize_xhtml(content)
+        result = bilingualize_xhtml(content, {segment.id: f"译文：{segment.text}" for segment in segments})
+        output = result.content.decode("utf-8")
+
+        self.assertEqual([segment.tag for segment in segments], ["caption", "th", "td", "li"])
+        self.assertIn("<th", output)
+        self.assertIn("<td", output)
+        self.assertIn("<li", output)
+        self.assertIn("译文：Table 2-6. Examples from InstructGPT.", output)
+        self.assertIn("译文：Input (context)", output)
+        self.assertIn("译文：Interpreters and translators", output)
+        self.assertIn("译文：InstructGPT", output)
+        self.assertNotIn("<tr><th>Input (context)</th><p", output)
+        self.assertNotIn("</li><p", output)
+
+    def test_bilingualize_translates_nested_index_list_item_prefixes(self) -> None:
+        content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Test</title></head>
+  <body>
+    <ul>
+      <li><span data-type="index-term">agents</span>, <a href="ch06.html">Agents</a>
+        <ul>
+          <li><span data-type="index-term">planning agents</span>, <a href="ch06.html#p">Planning</a></li>
+        </ul>
+      </li>
+    </ul>
+  </body>
+</html>"""
+
+        _, segments = bilingualize_xhtml(content)
+        result = bilingualize_xhtml(content, {segment.id: f"译文：{segment.text}" for segment in segments})
+        output = result.content.decode("utf-8")
+
+        self.assertEqual([segment.text for segment in segments], ["agents, Agents", "planning agents, Planning"])
+        self.assertIn("译文：agents, Agents", output)
+        self.assertIn("译文：planning agents, Planning", output)
+        self.assertLess(output.index("译文：agents, Agents"), output.index("planning agents"))
+
     def test_restyle_can_number_headings(self) -> None:
         content = b"""<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">

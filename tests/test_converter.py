@@ -8,6 +8,7 @@ import zipfile
 from ebook_bilingual.epub import convert_epub_to_bilingual, number_ncx_toc, translate_plan_segments
 from ebook_bilingual.html_bilingual import Segment, restyle_bilingual_xhtml
 from ebook_bilingual.llm import CachedTranslator, TranslationCache, cache_key
+from ebook_bilingual.profiling import ProfileMetrics
 
 
 FIXTURE_EPUB = Path(__file__).parents[1] / "books" / "tiny.epub"
@@ -24,6 +25,9 @@ class CacheAwarePrefixTranslator(PrefixTranslator):
 
     def cached_count(self, texts: list[str]) -> int:
         return sum(1 for text in texts if text in self.cached_texts)
+
+    def cached_batch(self, texts: list[str]) -> list[str | None]:
+        return [f"译文：{text}" if text in self.cached_texts else None for text in texts]
 
 
 class CountingTranslator:
@@ -166,6 +170,38 @@ class ConverterTests(unittest.TestCase):
         )
 
         self.assertEqual(result["chapter.xhtml"]["s1"], "已缓存。")
+
+    def test_partial_cache_hit_requests_only_uncached_segments(self) -> None:
+        cached_text = "Already cached."
+        missing_text = "Needs translation."
+        raw = CountingTranslator()
+        cache = TranslationCache(path=None, values={})
+        cache.set(cache_key("model", "English", "Chinese", cached_text), "已缓存。")
+        translator = CachedTranslator(raw, cache, "model", "English", "Chinese", autosave=False)
+        metrics = ProfileMetrics()
+
+        result = translate_plan_segments(
+            translator,
+            {
+                "chapter.xhtml": [
+                    Segment(id="s1", text=cached_text),
+                    Segment(id="s2", text=missing_text),
+                ]
+            },
+            batch_size=2,
+            profile_metrics=metrics,
+        )
+
+        self.assertEqual(result["chapter.xhtml"]["s1"], "已缓存。")
+        self.assertEqual(result["chapter.xhtml"]["s2"], f"译文：{missing_text}")
+        self.assertEqual(raw.calls, [[missing_text]])
+        payload = metrics.to_dict()
+        self.assertEqual(
+            payload["cache"],
+            {"hits": 1, "misses": 1, "fully_cached_batches": 0, "partially_cached_batches": 1, "uncached_batches": 0},
+        )
+        self.assertEqual(payload["llm"]["batches"], 1)
+        self.assertEqual(payload["llm"]["requested_segments"], 1)
 
     def test_concurrent_duplicate_text_is_translated_once(self) -> None:
         raw = CountingTranslator()
@@ -327,9 +363,13 @@ class ConverterTests(unittest.TestCase):
                 profile_timings=profile,
             )
 
-            self.assertEqual(stats.translated_segments, 251)
+            self.assertEqual(stats.translated_segments, 253)
             self.assertFalse(stats.skipped_documents)
             self.assertTrue(output_path.exists())
+            with zipfile.ZipFile(output_path, "r") as zf:
+                chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
+            self.assertIn("译文：Term", chapter)
+            self.assertIn("译文：Value", chapter)
             for key in ("plan", "llm", "html_insert_restyle", "zip_write"):
                 self.assertIn(key, profile)
 

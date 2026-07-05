@@ -133,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print coarse stage timings for planning, LLM, cache, XHTML, and ZIP work.",
     )
+    advanced_group.add_argument(
+        "--profile-json",
+        type=Path,
+        default=None,
+        help="Write machine-readable conversion profile metrics to this JSON file.",
+    )
 
     pricing_group = parser.add_argument_group("dry-run cost estimates")
     pricing_group.add_argument(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import copy
 from dataclasses import dataclass
 import posixpath
@@ -26,8 +27,15 @@ BLOCK_TAGS = {
     "figcaption",
     "dt",
     "dd",
+    "li",
+    "td",
+    "th",
+    "blockquote",
+    "caption",
 }
 
+INSIDE_TRANSLATION_TAGS = {"li", "td", "th", "caption"}
+NESTED_LIST_TAGS = {"ul", "ol"}
 NUMBERED_HEADING_TAGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 HEADING_MARKERS = {1: "■", 2: "◆", 3: "▸", 4: "•", 5: "–", 6: "·"}
 LEADING_NUMBER_RE = re.compile(r"^\s*(?:[■◆▸•–·]\s*)?(\d+(?:\.\d+)*)(?:[.)])?\s+")
@@ -106,15 +114,23 @@ def element_text(element: ET.Element) -> str:
     return normalize_text("".join(element.itertext()))
 
 
-def protected_segment_text(element: ET.Element) -> tuple[str, tuple[ProtectedInline, ...]]:
+def protected_segment_text(
+    element: ET.Element,
+    *,
+    skip_child_tags: set[str] | None = None,
+) -> tuple[str, tuple[ProtectedInline, ...]]:
     protected: list[ProtectedInline] = []
     parts: list[str] = []
+    skip_child_tags = skip_child_tags or set()
 
     def walk(current: ET.Element) -> None:
         if current.text:
             parts.append(current.text)
         for child in list(current):
-            if local_name(child.tag) in PROTECTED_INLINE_TAGS:
+            child_name = local_name(child.tag)
+            if child_name in skip_child_tags:
+                continue
+            if child_name in PROTECTED_INLINE_TAGS:
                 placeholder = f"__EBOOK_BILINGUAL_KEEP_{len(protected)}__"
                 clone = copy.deepcopy(child)
                 clone.tail = None
@@ -146,6 +162,10 @@ def has_any_class(element: ET.Element, class_names: set[str]) -> bool:
 
 def has_descendant_block(element: ET.Element) -> bool:
     return any(descendant is not element and local_name(descendant.tag) in BLOCK_TAGS for descendant in element.iter())
+
+
+def has_direct_nested_list(element: ET.Element) -> bool:
+    return any(local_name(child.tag) in NESTED_LIST_TAGS for child in list(element))
 
 
 def add_class(element: ET.Element, class_name: str) -> None:
@@ -263,13 +283,19 @@ def collect_segments(root: ET.Element, min_chars: int = 2) -> list[tuple[ET.Elem
     parents = parent_map(root)
     result: list[tuple[ET.Element, Segment]] = []
     for index, element in enumerate(root.iter()):
-        if local_name(element.tag) not in BLOCK_TAGS:
+        element_name = local_name(element.tag)
+        if element_name not in BLOCK_TAGS:
             continue
-        if has_descendant_block(element):
+        has_descendant = has_descendant_block(element)
+        nested_list_item = element_name == "li" and has_direct_nested_list(element)
+        if has_descendant and not nested_list_item:
             continue
         if should_skip_element(element) or has_skipped_ancestor(element, parents) or is_already_translated(element, parents):
             continue
-        text, protected_inlines = protected_segment_text(element)
+        if nested_list_item:
+            text, protected_inlines = protected_segment_text(element, skip_child_tags=BLOCK_TAGS | NESTED_LIST_TAGS)
+        else:
+            text, protected_inlines = protected_segment_text(element)
         translatable_text = translatable_text_without_placeholders(text, protected_inlines)
         if len(translatable_text) < min_chars:
             continue
@@ -281,7 +307,7 @@ def collect_segments(root: ET.Element, min_chars: int = 2) -> list[tuple[ET.Elem
                 Segment(
                     id=f"s{index}",
                     text=text,
-                    tag=local_name(element.tag),
+                    tag=element_name,
                     protected_inlines=protected_inlines,
                 ),
             )
@@ -364,6 +390,77 @@ def add_translation_after(
     return True
 
 
+def translation_element_for(
+    element: ET.Element,
+    translation: str,
+    protected_inlines: tuple[ProtectedInline, ...],
+) -> ET.Element:
+    ns = namespace_for(element.tag)
+    translation_element = ET.Element(
+        qname(ns, "p"),
+        {
+            "class": "bilingual-translation",
+            "data-bilingual": "translation",
+        },
+    )
+    set_translation_content(translation_element, translation, protected_inlines)
+    return translation_element
+
+
+def add_translations_after(
+    element_segments: list[tuple[ET.Element, Segment]],
+    translations: dict[str, str],
+    parents: dict[ET.Element, ET.Element],
+) -> int:
+    grouped: dict[ET.Element, list[tuple[int, ET.Element, str, tuple[ProtectedInline, ...]]]] = defaultdict(list)
+    child_indexes: dict[ET.Element, dict[ET.Element, int]] = {}
+    inside_items: list[tuple[ET.Element, str, tuple[ProtectedInline, ...]]] = []
+    for element, segment in element_segments:
+        translated = translations.get(segment.id)
+        if not translated:
+            continue
+        if local_name(element.tag) in INSIDE_TRANSLATION_TAGS:
+            inside_items.append((element, translated, segment.protected_inlines))
+            continue
+        parent = parents.get(element)
+        if parent is None:
+            continue
+        indexes = child_indexes.setdefault(parent, {child: index for index, child in enumerate(list(parent))})
+        index = indexes.get(element)
+        if index is None:
+            continue
+        grouped[parent].append((index, element, translated, segment.protected_inlines))
+
+    inserted = 0
+    for element, translated, protected_inlines in inside_items:
+        translation_element = translation_element_for(element, translated, protected_inlines)
+        add_class(element, "bilingual-original")
+        element.set("data-bilingual", "original")
+        add_translation_inside(element, translation_element)
+        inserted += 1
+
+    for parent, items in grouped.items():
+        for index, element, translated, protected_inlines in sorted(items, key=lambda item: item[0], reverse=True):
+            translation_element = translation_element_for(element, translated, protected_inlines)
+            add_class(element, "bilingual-original")
+            element.set("data-bilingual", "original")
+            translation_element.tail = element.tail
+            element.tail = "\n"
+            parent.insert(index + 1, translation_element)
+            inserted += 1
+    return inserted
+
+
+def add_translation_inside(element: ET.Element, translation_element: ET.Element) -> None:
+    translation_element.tail = "\n"
+    if local_name(element.tag) == "li":
+        for index, child in enumerate(list(element)):
+            if local_name(child.tag) in NESTED_LIST_TAGS:
+                element.insert(index, translation_element)
+                return
+    element.append(translation_element)
+
+
 def ensure_xhtml_doctype(content: bytes) -> bytes:
     if re.search(rb"<!DOCTYPE\s+html", content, flags=re.IGNORECASE):
         return content
@@ -385,6 +482,26 @@ def restyle_bilingual_xhtml(
     document_path: str | None = None,
 ) -> bytes:
     root = ET.fromstring(content)
+    restyle_bilingual_root(
+        root,
+        style_css=style_css,
+        number_headings=number_headings,
+        heading_counters=heading_counters,
+        heading_numbers=heading_numbers,
+        document_path=document_path,
+    )
+    return serialize_clean_xhtml(root)
+
+
+def restyle_bilingual_root(
+    root: ET.Element,
+    *,
+    style_css: str | None = None,
+    number_headings: bool = False,
+    heading_counters: list[int] | None = None,
+    heading_numbers: dict[str, str] | None = None,
+    document_path: str | None = None,
+) -> None:
     ns = namespace_for(root.tag)
     remove_invisible_index_terms(root)
     head = next((el for el in root.iter() if local_name(el.tag) == "head"), None)
@@ -419,6 +536,8 @@ def restyle_bilingual_xhtml(
             heading_numbers=heading_numbers,
         )
 
+
+def serialize_clean_xhtml(root: ET.Element) -> bytes:
     ET.indent(root, space="  ")
     serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     return ensure_xhtml_doctype(serialized)
@@ -578,14 +697,32 @@ def bilingualize_xhtml(
         return content, segments
 
     ensure_style(root)
-    parents = parent_map(root)
-    inserted = 0
-    for element, segment in element_segments:
-        translated = translations.get(segment.id)
-        if not translated:
-            continue
-        if add_translation_after(element, translated, parents, segment.protected_inlines):
-            inserted += 1
+    inserted = add_translations_after(element_segments, translations, parent_map(root))
 
     serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     return BilingualizeResult(content=ensure_xhtml_doctype(serialized), segments=inserted)
+
+
+def bilingualize_and_restyle_xhtml(
+    content: bytes,
+    *,
+    translations: dict[str, str],
+    min_chars: int = 2,
+    style_css: str | None = None,
+    number_headings: bool = False,
+    heading_counters: list[int] | None = None,
+    heading_numbers: dict[str, str] | None = None,
+    document_path: str | None = None,
+) -> BilingualizeResult:
+    root = ET.fromstring(content)
+    element_segments = collect_segments(root, min_chars=min_chars)
+    inserted = add_translations_after(element_segments, translations, parent_map(root))
+    restyle_bilingual_root(
+        root,
+        style_css=style_css,
+        number_headings=number_headings,
+        heading_counters=heading_counters,
+        heading_numbers=heading_numbers,
+        document_path=document_path,
+    )
+    return BilingualizeResult(content=serialize_clean_xhtml(root), segments=inserted)

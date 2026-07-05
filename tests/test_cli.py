@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -250,6 +251,36 @@ class CliTests(unittest.TestCase):
                 chapter = zf.read("OPS/chapter1.xhtml").decode("utf-8")
             self.assertIn("bilingual-clean-style", chapter)
             self.assertIn("bilingual-heading-number", chapter)
+
+    def test_profile_json_is_valid_and_does_not_leak_api_key_or_source_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "tiny.profile.epub"
+            profile_path = Path(tmpdir) / "profile.json"
+
+            with redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        str(FIXTURE_EPUB),
+                        str(output_path),
+                        "--mock",
+                        "--quiet",
+                        "--api-key",
+                        "secret-key-value",
+                        "--profile-json",
+                        str(profile_path),
+                    ]
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+            profile_text = profile_path.read_text(encoding="utf-8")
+            self.assertEqual(payload["mode"], "conversion")
+            self.assertEqual(payload["segments"], 3)
+            self.assertGreater(payload["output_size"], 0)
+            self.assertIn("cache", payload)
+            self.assertIn("llm", payload)
+            self.assertNotIn("secret-key-value", profile_text)
+            self.assertNotIn("The moon rose over the quiet river.", profile_text)
 
 
 if __name__ == "__main__":
